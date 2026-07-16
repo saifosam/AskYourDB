@@ -1408,7 +1408,7 @@ def quote_sql_value(value: str) -> str:
 def is_summary_query(question):
     """Check if this is a summary/aggregate query that shouldn't be limited."""
     q_lower = question.lower()
-    return bool(re.search(r'\b(count|total|average|avg|sum|max|min|group\s+by|per\s+|for\s+each)\b', q_lower))
+    return bool(re.search(r'\b(count|how many|how much|total|average|avg|sum|max|min|group\s+by|per\s+|for\s+each)\b', q_lower))
 
 
 def generate_sql(question):
@@ -1632,4 +1632,7 @@ def schema():
 if __name__ == "__main__":
     # Initialize schema cache
     get_table_info()
-    app.run(debug=True, port=5005)
+    PORT = int(os.environ.get("PORT", "5005"))
+    HOST = os.environ.get("HOST", "0.0.0.0")
+    DEBUG = os.environ.get("FLASK_DEBUG", "1") == "1"
+    app.run(debug=DEBUG, host=HOST, port=PORT)
