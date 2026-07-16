@@ -308,5 +308,5 @@ AI_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
 This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
 
-Copyright (c) 2026 Saifa. You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software.
+Copyright (c) 2026 Saif. You are free to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software.
 
