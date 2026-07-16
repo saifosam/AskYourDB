@@ -10,6 +10,11 @@
   Ask questions in plain English and get answers from your SQLite databases — powered by AI.
 </p>
 
+<p align="center">
+  <a href="https://saifosam.github.io/AskYourDB/" target="_blank"><img alt="Docs — AskYourDB Docs" src="https://img.shields.io/badge/Docs-saifosam.github.io%2FAskYourDB%E2%86%97-6366F1?style=for-the-badge&labelColor=1C1917&color=6366F1" height="24"></a>
+  <a href="https://github.com/saifosam/AskYourDB/actions/workflows/deploy-docs.yml" target="_blank"><img alt="Deploy docs" src="https://github.com/saifosam/AskYourDB/actions/workflows/deploy-docs.yml/badge.svg" height="24"></a>
+</p>
+
 </div>
 
 ---
@@ -105,20 +110,29 @@ AskYourDB is a web application that converts natural language questions into SQL
 
 ```
 AskYourDB/
-├── app.py              # Flask backend — all routes, AI logic, NL-to-SQL engine
+├── app.py                        # Flask backend — all routes, AI logic, NL-to-SQL engine
 ├── templates/
-│   └── index.html      # Chat UI frontend
+│   └── index.html                # Chat UI frontend
 ├── static/
-│   └── style.css       # Dark‑mode styling
-├── databases/          # Uploaded SQLite databases
+│   └── style.css                 # Dark‑mode styling
+├── databases/                    # Uploaded SQLite databases
 │   ├── northwind.db
 │   ├── default.db
 │   └── Chinook_Sqlite_AutoIncrementPKs.sqlite
-├── test_app_logic.py   # Unit tests (59 tests)
-├── requirements.txt    # Python dependencies
-├── .env                # API keys (GEMINI_API_KEY, OPENROUTER_API_KEY)
-├── LICENSE             # MIT License
-└── README.md           # This file
+├── docs/                         # VitePress documentation site
+│   ├── .vitepress/config.js      # Site config (theme, nav, sidebar)
+│   ├── guide/                    # Getting started, architecture, design
+│   ├── examples.md               # Query examples
+│   ├── index.md                  # Homepage with hero + feature cards
+│   ├── public/                   # Favicon & brand logo
+│   └── package.json              # VitePress dependency
+├── .github/workflows/
+│   └── deploy-docs.yml           # GitHub Pages auto-deploy workflow
+├── test_app_logic.py             # Unit tests (59+ tests)
+├── requirements.txt              # Python dependencies
+├── .env                          # API keys (GEMINI_API_KEY, OPENROUTER_API_KEY)
+├── LICENSE                       # MIT License
+└── README.md                     # This file
 ```
 
 ---
