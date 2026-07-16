@@ -1,7 +1,16 @@
-# AskYourDB
+<div align="center">
 
-> **Natural Language → SQL → Database Results**  
-> Ask questions in plain English and get answers from your SQLite databases — powered by AI.
+<p align="center">
+  <img src="assets/figs/logo/logo.png" alt="AskYourDB" height="128">
+</p>
+
+# AskYourDB: Natural Language → SQL → Database Results
+
+<p align="center">
+  Ask questions in plain English and get answers from your SQLite databases — powered by AI.
+</p>
+
+</div>
 
 ---
 
