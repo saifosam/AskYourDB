@@ -22,3 +22,6 @@ Thumbs.db
 # Project-specific
 nul
 flask_log.txt
+
+# Schema-RAG cache
+schema_embeddings.json

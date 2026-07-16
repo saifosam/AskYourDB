@@ -94,6 +94,233 @@ if AI_PROVIDER == "google" and GEMINI_API_KEY:
 
 print(f"AI_PROVIDER={AI_PROVIDER} selected.")
 
+# ── Schema-RAG Embedding Configuration ─────────────────────────────
+
+# Embedding provider for Schema-RAG (vector search for relevant tables)
+# "auto" = use the main AI_PROVIDER's embedding API, "off" = skip RAG
+SCHEMA_RAG = os.environ.get("SCHEMA_RAG", "auto").strip().lower()
+
+# Ollama embedding model (must be pulled locally)
+AI_OLLAMA_EMBED_MODEL = "nomic-embed-text"
+
+# Google embedding model
+AI_GOOGLE_EMBED_MODEL = "text-embedding-004"
+
+# How many top tables to retrieve via vector search
+SCHEMA_RAG_TOP_K = 5
+
+SCHEMA_EMBEDDINGS_FILE = "schema_embeddings.json"
+
+
+# ── Schema-RAG: Table Embedding & Retrieval ──────────────────────────
+
+def _get_embedding_db_key() -> str:
+    """Return a unique key for the current database (path + mtime)."""
+    try:
+        mtime = os.path.getmtime(DB_PATH)
+    except Exception:
+        mtime = 0
+    return f"{os.path.abspath(DB_PATH)}::{mtime}"
+
+
+def _generate_table_descriptions() -> dict:
+    """Generate a text description for each table for embedding."""
+    info = get_table_info()
+    fks = get_foreign_keys()
+    descriptions = {}
+    for t, cols in info.items():
+        parts = [f"Table: {t}"]
+        col_strs = []
+        for c in cols:
+            col_strs.append(f"{c['name']} ({c['type'] or 'unknown'})")
+        parts.append(f"Columns: {', '.join(col_strs)}")
+        table_fks = [fk for fk in fks if fk["table"] == t]
+        if table_fks:
+            fk_strs = [f"{fk['column']} references {fk['references_table']}.{fk['references_column']}" for fk in table_fks]
+            parts.append(f"Relationships: {'; '.join(fk_strs)}")
+        descriptions[t] = " | ".join(parts)
+    return descriptions
+
+
+def _ollama_embedding(text: str) -> list[float] | None:
+    """Generate embedding using Ollama's embedding API."""
+    base_url = AI_OLLAMA_BASE_URL.replace("/v1", "").replace("/chat", "")
+    url = f"{base_url}/api/embed"
+    try:
+        response = requests.post(url, json={
+            "model": AI_OLLAMA_EMBED_MODEL,
+            "input": text
+        }, timeout=30)
+        response.raise_for_status()
+        body = response.json()
+        embeddings = body.get("embeddings", [])
+        if embeddings:
+            return embeddings[0]
+        return None
+    except Exception as e:
+        print(f"Ollama embedding failed: {e}")
+        return None
+
+
+def _google_embedding(text: str) -> list[float] | None:
+    """Generate embedding using Google's embedding model."""
+    if not gemini_client:
+        return None
+    try:
+        result = gemini_client.models.embed_content(
+            model=AI_GOOGLE_EMBED_MODEL,
+            contents=text
+        )
+        if result and result.embeddings:
+            return result.embeddings[0].values
+        return None
+    except Exception as e:
+        print(f"Google embedding failed: {e}")
+        return None
+
+
+def _generate_embedding(text: str) -> list[float] | None:
+    """Generate embedding using the configured AI provider."""
+    if SCHEMA_RAG == "off":
+        return None
+    # Try Ollama first (local, no API key needed)
+    if AI_PROVIDER == "ollama":
+        emb = _ollama_embedding(text)
+        if emb:
+            return emb
+    # Try Google if available
+    if gemini_client:
+        emb = _google_embedding(text)
+        if emb:
+            return emb
+    # Final fallback: try Ollama regardless of provider
+    return _ollama_embedding(text)
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+SCHEMA_EMBEDDINGS_CACHE: dict | None = None
+TABLE_DESCRIPTIONS_CACHE: dict | None = None
+
+
+def _load_schema_embeddings() -> dict | None:
+    """Load cached embeddings from disk."""
+    path = os.path.join(DATABASES_DIR, SCHEMA_EMBEDDINGS_FILE)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_schema_embeddings(data: dict) -> None:
+    """Save embeddings to disk cache."""
+    path = os.path.join(DATABASES_DIR, SCHEMA_EMBEDDINGS_FILE)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Failed to save schema embeddings: {e}")
+
+
+def _initialize_schema_embeddings() -> None:
+    """Generate and cache embeddings for all tables."""
+    global SCHEMA_EMBEDDINGS_CACHE, TABLE_DESCRIPTIONS_CACHE
+
+    db_key = _get_embedding_db_key()
+    table_descriptions = _generate_table_descriptions()
+    TABLE_DESCRIPTIONS_CACHE = table_descriptions
+
+    # Check if we have cached embeddings for this exact DB
+    cached = _load_schema_embeddings()
+    if cached and cached.get("db_key") == db_key and cached.get("embeddings"):
+        SCHEMA_EMBEDDINGS_CACHE = cached
+        print(f"Schema-RAG: loaded {len(cached['embeddings'])} cached table embeddings")
+        return
+
+    if not table_descriptions:
+        SCHEMA_EMBEDDINGS_CACHE = {"db_key": db_key, "embeddings": {}}
+        return
+
+    # Generate embeddings for each table
+    emb_data = {}
+    for table_name, description in table_descriptions.items():
+        vector = _generate_embedding(description)
+        if vector:
+            emb_data[table_name] = vector
+            print(f"Schema-RAG: embedded table '{table_name}' ({len(vector)} dims)")
+        else:
+            # No embedding available, skip
+            print(f"Schema-RAG: no embedding for table '{table_name}', using keyword fallback")
+
+    SCHEMA_EMBEDDINGS_CACHE = {
+        "db_key": db_key,
+        "embeddings": emb_data,
+        "descriptions": table_descriptions
+    }
+    _save_schema_embeddings(SCHEMA_EMBEDDINGS_CACHE)
+    print(f"Schema-RAG: embedded {len(emb_data)}/{len(table_descriptions)} tables")
+
+
+def _find_relevant_tables(question: str, top_k: int | None = None) -> list[str] | None:
+    """Find the most relevant table names for a question using vector similarity.
+    Returns None if RAG is unavailable (falls back to full schema).
+    """
+    if top_k is None:
+        top_k = SCHEMA_RAG_TOP_K
+
+    # Lazy init embeddings if not yet loaded
+    if SCHEMA_EMBEDDINGS_CACHE is None:
+        _initialize_schema_embeddings()
+
+    if not SCHEMA_EMBEDDINGS_CACHE:
+        return None
+
+    embeddings = SCHEMA_EMBEDDINGS_CACHE.get("embeddings", {})
+    if not embeddings:
+        return None
+
+    # If the DB has fewer tables than top_k, return all
+    if len(embeddings) <= top_k:
+        return list(embeddings.keys())
+
+    # Try to embed the question
+    question_vec = _generate_embedding(question)
+    if not question_vec:
+        return None  # Fall back to full schema
+
+    # Score each table by cosine similarity
+    scored = []
+    for table_name, table_vec in embeddings.items():
+        sim = _cosine_similarity(question_vec, table_vec)
+        scored.append((sim, table_name))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_tables = [name for _, name in scored[:top_k]]
+    print(f"Schema-RAG: top {len(top_tables)} tables for '{question}': {top_tables}")
+    return top_tables
+
+
+def _build_schema_prompt_with_rag(question: str) -> str:
+    """Build schema prompt using Schema-RAG to filter relevant tables."""
+    relevant = _find_relevant_tables(question)
+    if relevant:
+        return schema_summary_compact(MAX_SCHEMA_TOKENS, relevant_tables=relevant)
+    return schema_summary_compact(MAX_SCHEMA_TOKENS)
+
+
 # ── AI Model Helpers ──────────────────────────────────────────────────
 
 # SYSTEM PROMPT: classify any input, detect whether it is greeting, showcase,
@@ -271,11 +498,16 @@ def schema_summary() -> str:
     return "\n".join(lines)
 
 
-def schema_summary_compact(max_tokens: int = MAX_SCHEMA_TOKENS) -> str:
+def schema_summary_compact(max_tokens: int = MAX_SCHEMA_TOKENS, relevant_tables: list[str] | None = None) -> str:
     """Return a rich schema description truncated to fit within the token budget.
+    If relevant_tables is provided, only include those tables (Schema-RAG).
     Tries levels from richest to most compact, computing only what's needed."""
     info = get_table_info()
+    if relevant_tables is not None:
+        info = {t: cols for t, cols in info.items() if t in relevant_tables}
     fks = get_foreign_keys()
+    if relevant_tables is not None:
+        fks = [fk for fk in fks if fk["table"] in relevant_tables or fk["references_table"] in relevant_tables]
 
     # Level 1: compact format without samples or key values (fast to compute)
     base_parts = ["=== DATABASE SCHEMA ===", ""]
@@ -525,14 +757,17 @@ def rewrite_followup_question(question: str, history: list) -> str:
     return q
 
 
-def _build_schema_prompt() -> str:
-    """Build the schema portion of the AI prompt, auto-sizing to fit token limits."""
+def _build_schema_prompt(question: str | None = None) -> str:
+    """Build the schema portion of the AI prompt, using Schema-RAG if a question is provided.
+    Auto-sizes to fit token limits."""
+    if question and SCHEMA_RAG != "off":
+        return _build_schema_prompt_with_rag(question)
     return schema_summary_compact(MAX_SCHEMA_TOKENS)
 
 
 def _build_sql_prompt(question: str) -> str:
     """Build the full prompt for SQL generation including rich schema context."""
-    schema = _build_schema_prompt()
+    schema = _build_schema_prompt(question)
     history_lines = ""
     if _conversation_history:
         history_lines = "\nPrevious questions and their SQL (for context):\n"
@@ -855,10 +1090,12 @@ TABLE_KEY_VALUES = None
 
 def invalidate_schema_cache() -> None:
     """Force re-analysis on next schema access."""
-    global TABLE_INFO, TABLE_FKS, TABLE_SAMPLES, TABLE_KEY_VALUES
+    global TABLE_INFO, TABLE_FKS, TABLE_SAMPLES, TABLE_KEY_VALUES, SCHEMA_EMBEDDINGS_CACHE, TABLE_DESCRIPTIONS_CACHE
     TABLE_INFO = None
     TABLE_FKS = None
     TABLE_SAMPLES = None
+    SCHEMA_EMBEDDINGS_CACHE = None
+    TABLE_DESCRIPTIONS_CACHE = None
     TABLE_KEY_VALUES = None
 
 
@@ -889,6 +1126,9 @@ def set_current_database(filename: str) -> None:
         raise FileNotFoundError("Database not found.")
     DB_PATH = path
     invalidate_schema_cache()
+    # Pre-initialize Schema-RAG embeddings for the new database
+    if SCHEMA_RAG != "off":
+        _initialize_schema_embeddings()
 
 
 def get_database_status() -> dict:
