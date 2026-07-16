@@ -25,3 +25,9 @@ flask_log.txt
 
 # Schema-RAG cache
 schema_embeddings.json
+
+# Node / VitePress
+docs/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
