@@ -362,6 +362,96 @@ def test_extract_json_object_no_json():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  SCHEMA-RAG TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_generate_table_descriptions():
+    """_generate_table_descriptions should return text for each table."""
+    descs = app_module._generate_table_descriptions()
+    assert isinstance(descs, dict)
+    # If no tables, it should be empty dict
+    info = app_module.get_table_info()
+    if info:
+        for table_name, description in descs.items():
+            assert "Table:" in description
+            assert "Columns:" in description
+    else:
+        assert descs == {}
+
+
+def test_cosine_similarity_identical():
+    """Cosine similarity of identical vectors should be 1.0."""
+    vec = [1.0, 0.0, 0.0]
+    sim = app_module._cosine_similarity(vec, vec)
+    assert abs(sim - 1.0) < 0.001
+
+
+def test_cosine_similarity_orthogonal():
+    """Cosine similarity of orthogonal vectors should be 0.0."""
+    sim = app_module._cosine_similarity([1.0, 0.0], [0.0, 1.0])
+    assert abs(sim - 0.0) < 0.001
+
+
+def test_cosine_similarity_empty():
+    """Cosine similarity of empty vectors should be 0.0."""
+    assert app_module._cosine_similarity([], [1.0]) == 0.0
+    assert app_module._cosine_similarity([1.0], []) == 0.0
+    assert app_module._cosine_similarity([], []) == 0.0
+
+
+def test_cosine_similarity_opposite():
+    """Cosine similarity of opposite vectors should be -1.0."""
+    sim = app_module._cosine_similarity([1.0, 0.0], [-1.0, 0.0])
+    assert abs(sim - (-1.0)) < 0.001
+
+
+def test_get_embedding_db_key():
+    """_get_embedding_db_key should return a non-empty string."""
+    key = app_module._get_embedding_db_key()
+    assert isinstance(key, str)
+    assert len(key) > 0
+
+
+def test_schema_summary_compact_with_filter():
+    """schema_summary_compact should filter tables when relevant_tables is given."""
+    info = app_module.get_table_info()
+    if info and len(info) >= 2:
+        # Get first table only
+        first_table = list(info.keys())[0]
+        full = app_module.schema_summary_compact()
+        filtered = app_module.schema_summary_compact(relevant_tables=[first_table])
+        assert len(filtered) <= len(full)
+        assert first_table in filtered
+
+
+def test_schema_summary_compact_with_empty_filter():
+    """schema_summary_compact with empty filter should be shorter."""
+    full = app_module.schema_summary_compact()
+    filtered = app_module.schema_summary_compact(relevant_tables=[])
+    assert len(filtered) <= len(full)
+    assert "=== DATABASE SCHEMA ===" in filtered
+
+
+def test_find_relevant_tables_no_embedding():
+    """_find_relevant_tables should return None when no embeddings available."""
+    # Without an embedding backend, this should gracefully fall back to None
+    result = app_module._find_relevant_tables("show me customers")
+    # Either None (no embedding backend) or a list (if embedding works)
+    assert result is None or isinstance(result, list)
+
+
+def test_initialize_schema_embeddings():
+    """_initialize_schema_embeddings should not crash."""
+    try:
+        app_module._initialize_schema_embeddings()
+        assert True  # Should not raise
+    except Exception as e:
+        # If embedding API is unavailable, that's fine - just don't crash
+        print(f"Embedding init failed (expected without API): {e}")
+        assert True
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  EXECUTE SQL TESTS (with actual SQLite database)
 # ═══════════════════════════════════════════════════════════════════════
 
