@@ -2010,6 +2010,8 @@ if __name__ == "__main__":
     # Initialize schema cache
     get_table_info()
     PORT = int(os.environ.get("PORT", "5005"))
+    # SECURITY: HOST=0.0.0.0 listens on all interfaces.
+    # Override to 127.0.0.1 in production / non-containerized deployments.
     HOST = os.environ.get("HOST", "0.0.0.0")
-    DEBUG = os.environ.get("FLASK_DEBUG", "1") == "1"
+    DEBUG = os.environ.get("FLASK_DEBUG", "0") == "1"
     app.run(debug=DEBUG, host=HOST, port=PORT)
