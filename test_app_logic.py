@@ -477,3 +477,137 @@ def test_execute_sql_invalid():
         assert False, "Should have raised an exception"
     except (sqlite3.OperationalError, Exception):
         assert True
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  SQL SAFETY VALIDATOR TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_is_safe_select_passes_simple_select():
+    """A plain SELECT should pass validation."""
+    assert app_module.is_safe_select("SELECT * FROM Customers")
+
+
+def test_is_safe_select_passes_with_cte():
+    """A WITH ... SELECT should pass validation."""
+    assert app_module.is_safe_select("WITH cte AS (SELECT 1) SELECT * FROM cte")
+
+
+def test_is_safe_select_passes_trailing_semicolon():
+    """A single trailing semicolon is allowed."""
+    assert app_module.is_safe_select("SELECT * FROM Customers;")
+
+
+def test_is_safe_select_rejects_drop():
+    """DROP TABLE must be rejected."""
+    assert not app_module.is_safe_select("DROP TABLE Customers")
+
+
+def test_is_safe_select_rejects_delete():
+    """DELETE must be rejected."""
+    assert not app_module.is_safe_select("DELETE FROM Customers")
+
+
+def test_is_safe_select_rejects_update():
+    """UPDATE must be rejected."""
+    assert not app_module.is_safe_select("UPDATE Customers SET City = 'Paris'")
+
+
+def test_is_safe_select_rejects_insert():
+    """INSERT must be rejected."""
+    assert not app_module.is_safe_select("INSERT INTO Customers VALUES (1, 'test')")
+
+
+def test_is_safe_select_rejects_alter():
+    """ALTER TABLE must be rejected."""
+    assert not app_module.is_safe_select("ALTER TABLE Customers ADD COLUMN foo TEXT")
+
+
+def test_is_safe_select_rejects_create():
+    """CREATE TABLE must be rejected."""
+    assert not app_module.is_safe_select("CREATE TABLE Hack (id INT)")
+
+
+def test_is_safe_select_rejects_truncate():
+    """TRUNCATE must be rejected."""
+    assert not app_module.is_safe_select("TRUNCATE TABLE Customers")
+
+
+def test_is_safe_select_rejects_attach():
+    """ATTACH DATABASE must be rejected."""
+    assert not app_module.is_safe_select("ATTACH DATABASE 'evil.db' AS evil")
+
+
+def test_is_safe_select_rejects_detach():
+    """DETACH DATABASE must be rejected."""
+    assert not app_module.is_safe_select("DETACH DATABASE evil")
+
+
+def test_is_safe_select_rejects_pragma():
+    """PRAGMA must be rejected."""
+    assert not app_module.is_safe_select("PRAGMA journal_mode=WAL")
+
+
+def test_is_safe_select_rejects_vacuum():
+    """VACUUM must be rejected."""
+    assert not app_module.is_safe_select("VACUUM")
+
+
+def test_is_safe_select_rejects_replace():
+    """REPLACE must be rejected."""
+    assert not app_module.is_safe_select("REPLACE INTO Customers VALUES (1, 'test')")
+
+
+def test_is_safe_select_rejects_grant():
+    """GRANT must be rejected."""
+    assert not app_module.is_safe_select("GRANT ALL ON Customers TO public")
+
+
+def test_is_safe_select_rejects_revoke():
+    """REVOKE must be rejected."""
+    assert not app_module.is_safe_select("REVOKE ALL ON Customers FROM public")
+
+
+def test_is_safe_select_rejects_stacked_sql():
+    """Multiple semicolon-separated statements must be rejected."""
+    assert not app_module.is_safe_select("SELECT 1; DROP TABLE Orders")
+
+
+def test_is_safe_select_rejects_stacked_sql_reversed():
+    """Destructive before SELECT must also be rejected."""
+    assert not app_module.is_safe_select("DROP TABLE Orders; SELECT 1")
+
+
+def test_is_safe_select_rejects_comment_wrapped_drop():
+    """A destructive statement hidden behind a comment must be rejected."""
+    assert not app_module.is_safe_select("SELECT 1 -- ;\nDROP TABLE Customers")
+
+
+def test_is_safe_select_rejects_block_comment_pragma():
+    """PRAGMA hidden with block comments must be rejected."""
+    assert not app_module.is_safe_select("SELECT /* test */ 1; /* */ PRAGMA journal_mode=WAL")
+
+
+def test_is_safe_select_rejects_empty():
+    """Empty string should be rejected."""
+    assert not app_module.is_safe_select("")
+
+
+def test_is_safe_select_rejects_none():
+    """None should be rejected."""
+    assert not app_module.is_safe_select(None)
+
+
+def test_is_safe_select_passes_select_with_comment():
+    """A SELECT with inline comments should pass."""
+    assert app_module.is_safe_select("SELECT -- comment\n 1 AS test")
+
+
+def test_is_safe_select_passes_select_with_block_comment():
+    """A SELECT with /* block */ comments should pass."""
+    assert app_module.is_safe_select("SELECT /* inline */ 1 AS test")
+
+
+def test_is_safe_select_rejects_drop_in_cte():
+    """DROP inside a CTE must be rejected."""
+    assert not app_module.is_safe_select("WITH cte AS (SELECT 1 FROM Customers WHERE 1=1 DROP TABLE Orders) SELECT * FROM cte")
