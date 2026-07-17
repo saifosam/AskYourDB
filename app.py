@@ -680,6 +680,15 @@ def check_relevance(question: str, history: list | None = None) -> dict:
     if question_words:
         return {"relevant": True, "reason": "Relevant"}
 
+    # If there is conversation history, allow short follow-up questions to pass through
+    # to AI classification and follow-up rewriting. This handles cases like "and white?"
+    # after a previous query about "company names with cheese in the name".
+    if history:
+        q_clean = q_lower.strip().rstrip('?.!')
+        followup_indicators = ('and ', 'or ', 'also ', 'what about ', 'how about ')
+        if any(q_clean.startswith(ind) for ind in followup_indicators) and len(q_clean.split()) <= 6:
+            return {"relevant": True, "reason": "Follow-up in conversation context"}
+
     return {"relevant": False, "reason": "Please ask a question about the attached database schema."}
 
 
@@ -704,16 +713,19 @@ def check_data_availability(question: str) -> dict:
 
 def rewrite_followup_question(question: str, history: list) -> str:
     """Rewrite simple follow-up questions using the previous question context."""
-    q = question.strip()
+    q = question.strip().rstrip('?!.')
     if not history:
         return q
 
     prev = history[-1].get("q", "")
+    prev_sql = history[-1].get("sql", "")
     prev_lower = prev.lower()
-    if not re.match(r"^(what about|how about|and|also)\b", q, re.I):
+
+    # If the question doesn't start with a follow-up indicator, return as-is
+    if not re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\b", q, re.I):
         return q
 
-    target_match = re.search(r"(?:what about|how about|and|also)\s+([a-z][a-z .'-]+)$", q, re.I)
+    target_match = re.search(r"(?:what about|how about|and|or|also)\s+([a-z][a-z .'-]+)$", q, re.I)
     if not target_match:
         return q
 
@@ -722,14 +734,14 @@ def rewrite_followup_question(question: str, history: list) -> str:
     if "people who live in" in prev_lower or "people live in" in prev_lower:
         return f"what are the people who live in {target}"
 
-    starts_with_match = re.search(r'^(?:what about|how about|and|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q, re.I)
-    contains_match = re.search(r'^(?:what about|how about|and|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q, re.I)
-    if starts_with_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower):
+    starts_with_match = re.search(r'^(?:what about|how about|and|or|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q, re.I)
+    contains_match = re.search(r'^(?:what about|how about|and|or|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q, re.I)
+    if starts_with_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
         return f"what are the people whose names start with {starts_with_match.group(1)}"
-    if contains_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower):
+    if contains_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
         return f"what are the people whose names contain {contains_match.group(1)}"
 
-    followup_match = re.match(r"^(?:what about|how about|and|also|now|next|continue|same)\s+(.+)$", q, re.I)
+    followup_match = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+(.+)$", q, re.I)
     if followup_match:
         specific = followup_match.group(1).strip()
         if specific:
@@ -740,12 +752,14 @@ def rewrite_followup_question(question: str, history: list) -> str:
             if "orders" in prev_lower:
                 return f"what are the orders in {specific}"
 
-    if re.match(r"^(?:what about|how about|and|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I):
-        specific = re.match(r"^(?:what about|how about|and|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I).group(1).strip()
+    if re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I):
+        specific = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I).group(1).strip()
         if "people" in prev_lower or "customers" in prev_lower or "employees" in prev_lower or "employee" in prev_lower:
             return f"what are the people in {specific}"
         if "products" in prev_lower:
             return f"what are the products in {specific}"
+        if "company" in prev_lower or "companies" in prev_lower or "supplier" in prev_lower or "suppliers" in prev_lower or "shipper" in prev_lower or "shippers" in prev_lower:
+            return f"show me the companies in {specific}"
 
     if "customers" in prev_lower and "from" in prev_lower:
         return f"what are the customers from {target}"
@@ -753,6 +767,47 @@ def rewrite_followup_question(question: str, history: list) -> str:
         return f"what are the customers in {target}"
     if "products" in prev_lower and "in" in prev_lower:
         return f"what are the products in {target}"
+    if ("company" in prev_lower or "companies" in prev_lower) and ("with" in prev_lower or "in" in prev_lower or "contain" in prev_lower):
+        return f"show me the companies with {target} in the name"
+
+    # ── Smart follow-up via SQL pattern analysis ────────────────────────
+    # For follow-ups like "and white?" when previous SQL used
+    # "LIKE '%cheese%'" on CompanyName, build a new question that
+    # replaces the old search term with the new one.
+    if prev_sql and target:
+        # Extract LIKE patterns from the previous SQL
+        like_pattern = re.search(
+            r"LIKE\s+'%([^']+)%'", prev_sql, re.I
+        )
+        if like_pattern:
+            old_term = like_pattern.group(1)
+            # Extract the column being searched (handles quoted identifiers)
+            like_col_match = re.search(
+                r"[\w".]+\s+LIKE\s+'%[^']+%'", prev_sql, re.I
+            )
+            col_name = like_col_match.group(1) if like_col_match else "value"
+
+            # Determine what kind of thing was being searched from the previous question
+            if "customer" in prev_lower or "people" in prev_lower or "employee" in prev_lower:
+                return f"what are the people with {target} in the name"
+            elif "product" in prev_lower:
+                return f"what are the products with {target} in the name"
+            elif "company" in prev_lower or "companies" in prev_lower or "supplier" in prev_lower or "shipper" in prev_lower:
+                return f"show me the companies with {target} in the name"
+            elif "order" in prev_lower:
+                return f"show me the orders with {target} in the name"
+            elif "category" in prev_lower:
+                return f"show me the categories with {target} in the name"
+            else:
+                # Generic fallback: reconstruct based on column name
+                return f"find all where {col_name} contains {target}"
+
+        # Extract equality patterns from previous SQL: Column = 'Value'
+        eq_pattern = re.search(
+            r"=\s+'([^']+)'", prev_sql, re.I
+        )
+        if eq_pattern:
+            return q  # Can't reliably substitute arbitrary equality values
 
     return q
 
