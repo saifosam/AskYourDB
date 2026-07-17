@@ -1,3 +1,23 @@
+import pytest
+import sys
+import types
+
+# Mock google.genai BEFORE importing app.py (it may not be installed in CI)
+# Force-remove any existing google namespace package first
+for key in list(sys.modules.keys()):
+    if key.startswith("google"):
+        del sys.modules[key]
+
+google_mod = types.ModuleType("google")
+google_genai_mod = types.ModuleType("google.genai")
+google_genai_types_mod = types.ModuleType("google.genai.types")
+google_mod.genai = google_genai_mod
+google_genai_mod.types = google_genai_types_mod
+sys.modules["google"] = google_mod
+sys.modules["google.genai"] = google_genai_mod
+sys.modules["google.genai.types"] = google_genai_types_mod
+sys.modules["google.genai.types"] = google_genai_types_mod
+
 import importlib.util
 from pathlib import Path
 
@@ -611,3 +631,19 @@ def test_is_safe_select_passes_select_with_block_comment():
 def test_is_safe_select_rejects_drop_in_cte():
     """DROP inside a CTE must be rejected."""
     assert not app_module.is_safe_select("WITH cte AS (SELECT 1 FROM Customers WHERE 1=1 DROP TABLE Orders) SELECT * FROM cte")
+
+
+def test_search_value_across_text_columns_finds_company_name():
+    """search_value_across_text_columns('cheese', 'Customers') should return 'CompanyName'."""
+    info = app_module.get_table_info()
+    if "Customers" not in info:
+        pytest.skip("Customers table not available in this database")
+    col = app_module.search_value_across_text_columns("cheese", "Customers", info)
+    assert col == "CompanyName", (
+        f"Expected 'cheese' to match 'CompanyName' (contains The Big Cheese), got {col!r}"
+    )
+    col2 = app_module.search_value_across_text_columns("white", "Customers", info)
+    if col2 is not None:
+        assert "Contact" not in col2, (
+            f"'white' should not match ContactTitle/ContactName, got {col2!r}"
+        )
