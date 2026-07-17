@@ -656,6 +656,16 @@ def _schema_tokens() -> set:
     return tokens
 
 
+def _looks_like_followup(question: str) -> bool:
+    """Check if a short question looks like a conversational follow-up (e.g. "and white?")."""
+    cleaned = question.strip().lower().rstrip('?!.')
+    if not cleaned:
+        return False
+    followup_starts = ('and ', 'or ', 'also ', 'what about ', 'how about ')
+    words = cleaned.split()
+    return any(cleaned.startswith(s) for s in followup_starts) and len(words) <= 6
+
+
 def check_relevance(question: str, history: list | None = None) -> dict:
     """Verify the input is relevant to the attached database."""
     q = (question or "").strip()
@@ -683,11 +693,8 @@ def check_relevance(question: str, history: list | None = None) -> dict:
     # If there is conversation history, allow short follow-up questions to pass through
     # to AI classification and follow-up rewriting. This handles cases like "and white?"
     # after a previous query about "company names with cheese in the name".
-    if history:
-        q_clean = q_lower.strip().rstrip('?.!')
-        followup_indicators = ('and ', 'or ', 'also ', 'what about ', 'how about ')
-        if any(q_clean.startswith(ind) for ind in followup_indicators) and len(q_clean.split()) <= 6:
-            return {"relevant": True, "reason": "Follow-up in conversation context"}
+    if history and _looks_like_followup(q):
+        return {"relevant": True, "reason": "Follow-up in conversation context"}
 
     return {"relevant": False, "reason": "Please ask a question about the attached database schema."}
 
@@ -758,8 +765,6 @@ def rewrite_followup_question(question: str, history: list) -> str:
             return f"what are the people in {specific}"
         if "products" in prev_lower:
             return f"what are the products in {specific}"
-        if "company" in prev_lower or "companies" in prev_lower or "supplier" in prev_lower or "suppliers" in prev_lower or "shipper" in prev_lower or "shippers" in prev_lower:
-            return f"show me the companies in {specific}"
 
     if "customers" in prev_lower and "from" in prev_lower:
         return f"what are the customers from {target}"
@@ -767,8 +772,6 @@ def rewrite_followup_question(question: str, history: list) -> str:
         return f"what are the customers in {target}"
     if "products" in prev_lower and "in" in prev_lower:
         return f"what are the products in {target}"
-    if ("company" in prev_lower or "companies" in prev_lower) and ("with" in prev_lower or "in" in prev_lower or "contain" in prev_lower):
-        return f"show me the companies with {target} in the name"
 
     # ── Smart follow-up via SQL pattern analysis ────────────────────────
     # For follow-ups like "and white?" when previous SQL used
@@ -780,10 +783,9 @@ def rewrite_followup_question(question: str, history: list) -> str:
             r"LIKE\s+'%([^']+)%'", prev_sql, re.I
         )
         if like_pattern:
-            old_term = like_pattern.group(1)
-            # Extract the column being searched (handles quoted identifiers)
+            # Extract the column name used in the LIKE condition
             like_col_match = re.search(
-                r"[\w".]+\s+LIKE\s+'%[^']+%'", prev_sql, re.I
+                r"(\w+)\s+LIKE\s+'%[^']+%'", prev_sql, re.I
             )
             col_name = like_col_match.group(1) if like_col_match else "value"
 
@@ -1221,6 +1223,7 @@ def get_table_info(force_refresh: bool = False):
 TABLE_ALIASES = {
     "order": "Orders", "orders": "Orders", "purchase": "Orders", "purchases": "Orders",
     "customer": "Customers", "customers": "Customers", "client": "Customers", "clients": "Customers",
+    "company": "Customers", "companies": "Customers",
     "product": "Products", "products": "Products", "item": "Products", "items": "Products",
     "category": "Categories", "categories": "Categories",
     "supplier": "Suppliers", "suppliers": "Suppliers", "vendor": "Suppliers", "vendors": "Suppliers",
@@ -1319,14 +1322,21 @@ def extract_text_conditions(question, table):
     starts_with = re.search(r'(?:name|names)\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q_lower)
     contains = re.search(r'(?:name|names)\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q_lower)
     in_name = re.search(r'with\s+(?:a\s+)?([a-z])\s+(?:in|inside)\s+their\s+name\b', q_lower)
+    # Broader pattern for "with [word(s)] in the/their name" (handles multi-character values)
+    with_in_name = re.search(r'with\s+(?:a\s+)?([a-z][a-z\s]*?)\s+in\s+(?:the\s+)?(?:their\s+)?name\b', q_lower) if not (starts_with or contains or in_name) else None
 
-    if (starts_with or contains or in_name) and name_cols:
+    if (starts_with or contains or in_name or with_in_name) and name_cols:
         if starts_with:
             like_val = starts_with.group(1).upper() + '%'
         elif contains:
             like_val = '%' + contains.group(1).upper() + '%'
-        else:
+        elif in_name:
             like_val = '%' + in_name.group(1).upper() + '%'
+        else:
+            # with_in_name: extract just the first word (skip "a " prefix)
+            val = with_in_name.group(1).strip()
+            val = re.sub(r'^a\s+', '', val)  # Remove leading "a " if present
+            like_val = '%' + val.upper() + '%'
         conditions.append((f'"{table}"."{name_cols[0]}"', "LIKE", f"'{like_val}'"))
 
     # ── Geography column matching (city, country, etc.) ────────────────
@@ -1349,18 +1359,22 @@ def extract_text_conditions(question, table):
 
     # ── Named value matching (only if question mentions a likely value) ─
     if name_cols and any(w in q_lower for w in ["show", "find", "list", "get", "named", "called"]):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        try:
-            cursor.execute(f'SELECT DISTINCT "{name_cols[0]}" FROM "{table}" WHERE "{name_cols[0]}" IS NOT NULL')
-            values = [r[0] for r in cursor.fetchall() if r[0]]
-            conn.close()
-            for val in values:
-                if val and val.lower() in q_lower:
-                    conditions.append((f'"{table}"."{name_cols[0]}"', "=", quote_sql_value(val)))
-                    break
-        except Exception:
-            conn.close()
+        # Skip if we already have a LIKE condition for this column (avoid redundant filters)
+        has_like = any(c[1] == "LIKE" and name_cols[0].lower() in c[0].lower() for c in conditions)
+        if not has_like:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f'SELECT DISTINCT "{name_cols[0]}" FROM "{table}" WHERE "{name_cols[0]}" IS NOT NULL')
+                values = [r[0] for r in cursor.fetchall() if r[0]]
+                conn.close()
+                for val in values:
+                    # Use word boundary check to avoid false positives like "IT" matching inside "whITe"
+                    if val and re.search(r'\b' + re.escape(val.lower()) + r'\b', q_lower):
+                        conditions.append((f'"{table}"."{name_cols[0]}"', "=", quote_sql_value(val)))
+                        break
+            except Exception:
+                conn.close()
 
     return conditions
 
@@ -1841,6 +1855,15 @@ def query():
     # Stage 2: classify the intent and handle non-query inputs.
     classification = ask_classification(question, _conversation_history)
     category = classification.get("category", "db_query")
+
+    # If the AI says irrelevant but the question looks like a short follow-up with
+    # conversation history, override to db_query so the local rewrite and SQL
+    # generation can handle it. This handles cases like "and white?" after a
+    # previous query about "companies with cheese in the name".
+    if category == "irrelevant" and _conversation_history and _looks_like_followup(question):
+        category = "db_query"
+        classification["category"] = "db_query"
+
     if category == "irrelevant":
         return jsonify({
             "is_relevant": False,
