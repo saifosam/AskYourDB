@@ -1333,9 +1333,8 @@ def extract_text_conditions(question, table):
         elif in_name:
             like_val = '%' + in_name.group(1).upper() + '%'
         else:
-            # with_in_name: extract just the first word (skip "a " prefix)
+            # with_in_name: value directly captured ("a " prefix is outside the group)
             val = with_in_name.group(1).strip()
-            val = re.sub(r'^a\s+', '', val)  # Remove leading "a " if present
             like_val = '%' + val.upper() + '%'
         conditions.append((f'"{table}"."{name_cols[0]}"', "LIKE", f"'{like_val}'"))
 
@@ -1739,9 +1738,59 @@ def generate_sql(question):
         return 'SELECT 1'
 
 
+def is_safe_select(sql: str) -> bool:
+    """Validate that a SQL statement is a safe read-only SELECT (or WITH ... SELECT).
+
+    - Strips comments (-- and /* */) and surrounding whitespace.
+    - Confirms the statement starts with SELECT or WITH.
+    - Rejects destructive/DDL keywords as whole words (case-insensitive).
+    - Rejects multiple statements (semicolons before end of input).
+    """
+    if not sql or not sql.strip():
+        return False
+
+    text = sql.strip()
+
+    # Remove single-line comments (-- ...)
+    text = re.sub(r'--.*?(\n|$)', '\n', text)
+    # Remove block comments (/* ... */)
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    text = text.strip()
+
+    if not text:
+        return False
+
+    # Reject if a semicolon appears before the end, allowing one optional trailing semicolon
+    semi_count = text.count(';')
+    if semi_count > 1:
+        return False
+    if semi_count == 1 and not text.rstrip().endswith(';'):
+        return False
+
+    text_upper = text.upper().lstrip()
+
+    # Must start with SELECT or WITH
+    if not (text_upper.startswith('SELECT') or text_upper.startswith('WITH')):
+        return False
+
+    # Reject destructive / DDL keywords as whole words
+    forbidden = {
+        'DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE',
+        'TRUNCATE', 'ATTACH', 'DETACH', 'PRAGMA', 'VACUUM', 'REPLACE',
+        'GRANT', 'REVOKE',
+    }
+    # Break into words and check each one
+    words = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', text_upper)
+    for w in words:
+        if w in forbidden:
+            return False
+
+    return True
+
+
 def execute_sql(sql):
-    """Execute SQL query against the database and return results."""
-    conn = sqlite3.connect(DB_PATH)
+    """Execute a read-only SQL query against the database and return results."""
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -1918,6 +1967,16 @@ def query():
     sql = result.get("sql") if result["action"] == "SQL" else None
     if not sql:
         sql = generate_sql(question)
+
+    # Safety validation: reject unsafe SQL before execution
+    if not is_safe_select(sql):
+        return jsonify({
+            "is_relevant": False,
+            "reason": "The generated query was rejected by the safety validator. Only SELECT / WITH statements are allowed.",
+            "sql": sql,
+            "results": [],
+            "columns": [],
+        })
 
     try:
         columns, results = execute_sql(sql)
