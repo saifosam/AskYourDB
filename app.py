@@ -11,8 +11,14 @@ import sqlite3
 import requests
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+# Google Gemini SDK (optional — gracefully handled if not installed)
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
+
 from werkzeug.utils import secure_filename
 
 load_dotenv()
@@ -332,14 +338,54 @@ CLASSIFICATION_SYSTEM_PROMPT = (
     "followup, db_query, irrelevant. If the input is a follow-up, "
     "also rewrite it into a full standalone database question using the history. "
     "Return exactly one JSON object with keys: category, rewrite, reason. "
-    "Do not include extra text."
+    "Do not include extra text.\n"
+    "--- Synonym hints (use these to match everyday language to table names) ---\n"
+    "users/people/clients ≈ Customers or Employees\n"
+    "items/products/goods ≈ Products\n"
+    "orders/purchases/transactions ≈ Orders\n"
+    "categories/groups/types ≈ Categories\n"
+    "suppliers/vendors/providers ≈ Suppliers\n"
+    "companies/businesses/orgs ≈ Customers or Suppliers\n"
+    "A question mentioning these synonyms IS a valid db_query — do NOT mark it irrelevant."
 )
+
+
+def _build_classification_schema_hint() -> str:
+    """Build a compact, fast schema summary for classification prompts.
+    Returns just table names + 2-3 key text column names per table,
+    so the classifier knows what content exists without the full schema.
+    """
+    info = get_table_info()
+    if not info:
+        return ""
+    lines = ["--- Available tables & their text columns ---"]
+    for table in sorted(info.keys()):
+        cols = info[table]
+        # Find text-ish columns (names, titles, descriptions)
+        text_cols = [
+            c["name"] for c in cols
+            if c["type"] and any(t in c["type"].upper() for t in ("CHAR", "CLOB", "TEXT", "VARCHAR"))
+        ]
+        # If no text columns found, just show the first 3 columns
+        if not text_cols:
+            text_cols = [c["name"] for c in cols[:3]]
+        # Show up to 3 key text columns
+        shown = text_cols[:3]
+        col_str = ", ".join(shown)
+        lines.append(f"  {table}: {col_str}")
+    return "\n".join(lines)
 
 # SYSTEM PROMPT: generate SQL or deny if the question is unrelated or the data is not available.
 SQL_SYSTEM_PROMPT = (
     "You are a professional assistant for the attached SQLite database. Respond only with either: "
     "SQL: <sqlite SELECT query> or DENY: <reason>. Do not invent columns or data. "
-    "If the question is unrelated to the database, respond with DENY."
+    "If the question is unrelated to the database, respond with DENY.\n"
+    "--- Column guidance ---\n"
+    "Do NOT search ContactTitle or ContactName for product, category, food or item names.\n"
+    "If the question asks about a product, category, or item name (like a food name), "
+    "search ProductName or CategoryName, not customer/employee/contact fields.\n"
+    "ContactTitle is a person's job title. ContactName is a person's full name.\n"
+    "When the user asks for 'company names' use CompanyName from the Customers table."
 )
 
 # Conversation history for follow-up questions (last 5 turns)
@@ -831,9 +877,28 @@ def _build_sql_prompt(question: str) -> str:
         for h in _conversation_history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
+    # Annotate schema columns with semantic hints for small models
+    hint_lines = []
+    table_info = get_table_info()
+    job_titles = {"contacttitle", "title"}
+    person_names = {"contactname", "firstname", "lastname"}
+    skip_cols_for_product_search = {"contacttitle", "contactname", "firstname", "lastname"}
+    for t, cols in table_info.items():
+        for c in cols:
+            ckey = c["name"].lower().replace(" ", "").replace("_", "")
+            if ckey in job_titles:
+                hint_lines.append(f"HINT: {t}.{c['name']} is a person's job title, not a product or category name.")
+            elif ckey in person_names:
+                hint_lines.append(f"HINT: {t}.{c['name']} is a person's name, not a product or category name.")
+
+    hint_section = "\n".join(hint_lines)
+    if hint_section:
+        hint_section = "\n" + hint_section + "\n"
+
     return (
         f"Attached SQLite DB schema (includes columns, types, sample data, foreign keys, and key column values):\n"
         f"{schema}\n"
+        f"{hint_section}"
         f"{history_lines}\n"
         f"New question: \"{question}\"\n\n"
         "Respond with one of:\n"
@@ -942,6 +1007,8 @@ def ask_ollama(question: str) -> dict:
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
+            "options": {"num_ctx": 8192},
+            "max_tokens": 2048,
         })
         body = response.json()
         text = ""
@@ -954,8 +1021,14 @@ def ask_ollama(question: str) -> dict:
             print("ask_ollama: empty response — falling back")
             return {"action": "FALLBACK"}
         return _parse_ai_response_text(text)
+    except requests.exceptions.Timeout as e:
+        print(f"ask_ollama: request timed out — {e}")
+        return {"action": "FALLBACK"}
+    except requests.exceptions.ConnectionError as e:
+        print(f"ask_ollama: connection failed — {e}")
+        return {"action": "FALLBACK"}
     except Exception as e:
-        print(f"ask_ollama error: {e}")
+        print(f"ask_ollama: unexpected error ({type(e).__name__}): {e}")
         if gemini_client:
             print("Ollama unavailable, falling back to Gemini for SQL generation.")
             return ask_gemini(question)
@@ -1359,23 +1432,54 @@ def extract_text_conditions(question, table):
     # ── Named value matching (only if question mentions a likely value) ─
     if name_cols and any(w in q_lower for w in ["show", "find", "list", "get", "named", "called"]):
         # Skip if we already have a LIKE condition for this column (avoid redundant filters)
-        has_like = any(c[1] == "LIKE" and name_cols[0].lower() in c[0].lower() for c in conditions)
+        has_like = any(c[1] == "LIKE" for c in conditions)
         if not has_like:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            try:
-                cursor.execute(f'SELECT DISTINCT "{name_cols[0]}" FROM "{table}" WHERE "{name_cols[0]}" IS NOT NULL')
-                values = [r[0] for r in cursor.fetchall() if r[0]]
-                conn.close()
-                for val in values:
-                    # Use word boundary check to avoid false positives like "IT" matching inside "whITe"
-                    if val and re.search(r'\b' + re.escape(val.lower()) + r'\b', q_lower):
-                        conditions.append((f'"{table}"."{name_cols[0]}"', "=", quote_sql_value(val)))
-                        break
-            except Exception:
-                conn.close()
+            # Try to extract a meaningful value word from the question
+            value_match = re.search(r'(?:about|of|for|with)\s+([a-z][a-z\s]+?)(?:\s+in\s+the\s+name)?$', q_lower)
+            if not value_match:
+                value_match = re.search(r'\b(named|called)\s+([a-z][a-z\s]+?)$', q_lower)
+            if value_match:
+                raw_value = value_match.group(1) if value_match.lastindex == 1 else value_match.group(2)
+                # Use the new cross-column search helper
+                found_col = search_value_across_text_columns(raw_value.strip(), table, info)
+                if found_col:
+                    conditions.append((f'"{table}"."{found_col}"', "LIKE", quote_sql_value(f'%{raw_value.strip()}%')))
 
     return conditions
+
+
+def search_value_across_text_columns(value: str, table: str, info: dict) -> str | None:
+    """Search for a value across ALL text columns in a table.
+    Returns the column name where a case-insensitive DISTINCT match is found,
+    or None if no column contains the value.
+    Works like the geography matching already in extract_text_conditions().
+    """
+    if not value or not table or table not in info:
+        return None
+    val_lower = value.lower().strip()
+    if len(val_lower) < 2:
+        return None
+    text_cols = [
+        c["name"] for c in info[table]
+        if c["type"] and any(t in c["type"].upper() for t in ("CHAR", "CLOB", "TEXT", "VARCHAR"))
+    ]
+    if not text_cols:
+        text_cols = [c["name"] for c in info[table]]
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        for col in text_cols:
+            cursor.execute(f'SELECT DISTINCT "{col}" FROM "{table}" WHERE "{col}" IS NOT NULL ORDER BY 1')
+            distinct_vals = [str(r[0]).lower().strip() for r in cursor.fetchall() if r[0]]
+            for dv in distinct_vals:
+                if val_lower == dv or val_lower in dv:
+                    conn.close()
+                    return col
+        conn.close()
+        return None
+    except Exception:
+        conn.close()
+        return None
 
 
 def extract_date_conditions(question):
@@ -1675,15 +1779,32 @@ def build_general_select_sql(question, table, extra_columns):
                     value = match.group(1).strip()
                     where_clauses.append(f'"{table}"."{col_name}" = ' + quote_sql_value(value))
 
-    # Add pattern matching conditions only for explicit value phrases
-    explicit_match = re.search(r'\b(?:named|called|make|makes|from|in|about|of)\s+([a-z0-9 &"\'\-]+)', q_lower)
+    # Smart value matching: search across actual DB values before guessing a column
+    explicit_match = re.search(r'\b(?:named|called|make|makes|from|in|about|of|with)\s+([a-z0-9 &"\'\-]+)', q_lower)
     if explicit_match:
         value = explicit_match.group(1).strip()
-        if value and not re.match(r'^(what|who|show|list|find|give|give me)\b', value):
-            preferred_cols = get_preferred_text_columns(table, info)
-            if preferred_cols:
-                col_name = preferred_cols[0]
-                where_clauses.append(f'"{table}"."{col_name}" LIKE ' + quote_sql_value(f'%{value}%'))
+        # Trim trailing conjunctive phrases like "in the name", "in the company", etc.
+        # so that "white in the name" becomes "white" before column-value matching.
+        value = re.sub(r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*$', '', value).strip()
+        if value and not re.match(r'^(what|who|show|list|find|give|give me|the)\b', value):
+            # First try to find which column actually contains this value
+            found_col = search_value_across_text_columns(value, table, info)
+            if found_col:
+                where_clauses.append(f'"{table}"."{found_col}" LIKE ' + quote_sql_value(f'%{value}%'))
+            else:
+                # No column matched; check if the value is a generic term like "cheese"
+                # that might exist in a related table we haven't joined
+                for other_table in info:
+                    if other_table == table:
+                        continue
+                    other_col = search_value_across_text_columns(value, other_table, info)
+                    if other_col:
+                        # Found it in another table — try to build a JOIN
+                        where_clauses.append(f'"{other_table}"."{other_col}" LIKE ' + quote_sql_value(f'%{value}%'))
+                        break
+                else:
+                    # Really no match found — return a no-match response indicator
+                    return f"NO_MATCH: no column found containing '{value}' — try a different value"
 
     extra_conditions = extract_text_conditions(question, table)
     for col, op, val in extra_conditions:
@@ -1964,9 +2085,27 @@ def query():
             "columns": [],
         })
 
-    sql = result.get("sql") if result["action"] == "SQL" else None
+    from_ai = result["action"] == "SQL"
+    sql = result.get("sql") if from_ai else None
+    source = (
+        "ollama" if AI_PROVIDER == "ollama" and from_ai else
+        "openrouter" if AI_PROVIDER == "openrouter" and from_ai else
+        "gemini" if AI_PROVIDER == "google" and from_ai else
+        "fallback_rules"
+    )
     if not sql:
         sql = generate_sql(question)
+        source = "fallback_rules"
+
+    # Handle no-match response from the fallback engine before safety validation
+    if sql and sql.startswith("NO_MATCH:"):
+        return jsonify({
+            "is_relevant": False,
+            "reason": sql,
+            "sql": sql,
+            "results": [],
+            "columns": [],
+        })
 
     # Safety validation: reject unsafe SQL before execution
     if not is_safe_select(sql):
@@ -1987,8 +2126,9 @@ def query():
         return jsonify({
             "is_relevant": True,
             "sql": sql,
-            "results": results,
+            "source": source,
             "columns": columns,
+            "results": results,
         })
     except Exception as e:
         return jsonify({
@@ -2004,6 +2144,12 @@ def schema():
     """Return the database schema for reference."""
     info = get_table_info()
     return jsonify(info)
+
+
+@app.route("/history", methods=["GET"])
+def history():
+    """Return the conversation history for the UI sidebar."""
+    return jsonify(_conversation_history)
 
 
 if __name__ == "__main__":
