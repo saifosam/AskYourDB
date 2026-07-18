@@ -8,6 +8,12 @@
 </head>
 <body>
     <div id="app" class="app-layout">
+        <!-- Loading Bar (positioned absolute at top of .main-area) -->
+        <div class="loading-overlay" id="loadingOverlay">
+            <div class="loading-bar"></div>
+        </div>
+
+        <div class="content-row">
         <!-- ═══ SIDEBAR ═══ -->
         <aside class="sidebar" id="sidebar" aria-label="Query history">
             <div class="sidebar-header">
@@ -63,7 +69,7 @@
 
             <input id="dbFileInput" type="file" accept=".db,.sqlite,.sqlite3" hidden />
 
-            <!-- Messages Area -->
+            <!-- Messages Area (scrolls independently, input stays below) -->
             <main class="messages-container" id="messagesContainer">
                 <!-- Welcome message -->
                 <div class="message bot-message">
@@ -81,12 +87,15 @@
                 </div>
             </main>
 
-            <!-- Loading Overlay (full-width bar during query) -->
-            <div class="loading-overlay" id="loadingOverlay">
-                <div class="loading-bar"></div>
-            </div>
+            <!-- Scroll to Bottom Button (appears when scrolled up) -->
+            <button class="scroll-bottom-btn" id="scrollBottomBtn" onclick="scrollToBottom()" title="Scroll to bottom" aria-label="Scroll to bottom">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/>
+                    <polyline points="19 12 12 19 5 12"/>
+                </svg>
+            </button>
 
-            <!-- Input Area -->
+            <!-- Input Area (always at bottom, never scrolls away) -->
             <footer class="input-area">
                 <div class="input-wrapper">
                     <textarea
@@ -106,6 +115,7 @@
                 <p class="disclaimer">Natural language to SQL · Powered by Ollama</p>
             </footer>
         </div>
+    </div>
     </div>
 
     <!-- Database Manager Modal -->
@@ -206,10 +216,10 @@
             reversed.forEach((item, i) => {
                 const el = document.createElement('div');
                 el.className = 'history-item';
-                const preview = item.q.length > 60 ? item.q.slice(0, 60) + '…' : item.q;
+                const preview = item.q.length > 55 ? item.q.slice(0, 55) + '…' : item.q;
                 el.innerHTML = `
                     <div class="history-q">${escapeHtml(preview)}</div>
-                    <div class="history-meta">${escapeHtml((item.sql || '').slice(0, 40))}${(item.sql || '').length > 40 ? '…' : ''}</div>
+                    <div class="history-meta">${escapeHtml((item.sql || '').slice(0, 35))}${(item.sql || '').length > 35 ? '…' : ''}</div>
                 `;
                 el.addEventListener('click', () => {
                     questionInput.value = item.q;
@@ -577,6 +587,7 @@
                         `).join('')}
                     </div>
                 `;
+                scrollToBottom();
             } catch (e) {
                 // Silently fail — suggestions are nice-to-have
             }
@@ -584,7 +595,14 @@
 
         // Click a suggestion chip to auto-fill and send
         window.useSuggestion = function(label) {
-            questionInput.value = `show me all ${label.toLowerCase().split('.')[0]} with their ${label.toLowerCase().split('.')[1]}`;
+            if (label.includes('.')) {
+                // "Table.Column" format from no-results suggestions
+                const parts = label.toLowerCase().split('.');
+                questionInput.value = `show me all ${parts[0]} with their ${parts[1]}`;
+            } else {
+                // Full query text from welcome/warning suggestions (e.g. "show me all customers")
+                questionInput.value = label;
+            }
             questionInput.style.height = 'auto';
             questionInput.style.height = Math.min(questionInput.scrollHeight, 200) + 'px';
             sendButton.disabled = false;
@@ -714,6 +732,7 @@
             const bubble = msgEl.querySelector('.loading-bubble');
             if (!bubble) return;
 
+            const warnId = 'warn-suggest-' + Date.now();
             bubble.className = 'message-bubble bot-bubble warning-bubble';
             bubble.innerHTML = `
                 <div class="warning-header">
@@ -725,9 +744,39 @@
                     <span>Irrelevant Question</span>
                 </div>
                 <p class="warning-message">${escapeHtml(warningMsg)}</p>
-                <p class="warning-hint">Please ask questions related to the attached database schema.</p>
+                <p class="warning-hint">Your question may use terms not found in the database. Try asking about one of these tables:</p>
+                <div class="suggestion-row" id="${warnId}">
+                    <div class="suggestion-chips-placeholder">Loading suggestions...</div>
+                </div>
             `;
             scrollToBottom();
+
+            // Load table name suggestions
+            loadWarningSuggestions(warnId);
+        }
+
+        // ── Load suggestion chips for rejected/irrelevant questions ────
+        async function loadWarningSuggestions(containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            try {
+                const res = await fetch('/schema');
+                const data = await res.json();
+                if (!data) return;
+                const tables = Object.keys(data);
+                if (tables.length === 0) return;
+                const chips = tables.slice(0, 6).map(t => `show me all ${t.toLowerCase()}`);
+                container.innerHTML = `
+                    <div class="suggestion-chips">
+                        ${chips.map(text =>
+                            `<button class="suggestion-chip" onclick="useSuggestion('${escapeHtml(text)}')">${escapeHtml(text)}</button>`
+                        ).join('')}
+                    </div>
+                `;
+                scrollToBottom();
+            } catch (e) {
+                container.innerHTML = '';
+            }
         }
 
         // ── Utilities ───────────────────────────────────────────────────
@@ -750,10 +799,27 @@
         }
 
         function scrollToBottom() {
-            requestAnimationFrame(() => {
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            });
+            // scrollIntoView on the last message is the most reliable way to scroll
+            // a flex child with overflow-y: auto.
+            setTimeout(() => {
+                const last = messagesContainer.lastElementChild;
+                if (last) {
+                    last.scrollIntoView({ block: 'end', behavior: 'instant' });
+                } else {
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                }
+            }, 30);
         }
+
+        // ── Scroll-to-bottom button visibility ────────────────────────
+        messagesContainer.addEventListener('scroll', function () {
+            const threshold = 100;
+            const atBottom = this.scrollHeight - this.scrollTop - this.clientHeight < threshold;
+            const btn = document.getElementById('scrollBottomBtn');
+            if (btn) {
+                btn.classList.toggle('visible', !atBottom);
+            }
+        });
 
         // ── Initial focus ───────────────────────────────────────────────
         questionInput.focus();
