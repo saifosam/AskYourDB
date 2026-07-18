@@ -1161,13 +1161,14 @@ def ask_gemini_classification(question: str, history: list | None = None) -> dic
         for h in history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
-    prompt = (
-        f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
-        f"{schema_hint}\n" if schema_hint else ""
-        f"{history_lines}\n"
-        f"User input: \"{question}\"\n"
-        "Reply with JSON only."
-    )
+    prompt_parts = [CLASSIFICATION_SYSTEM_PROMPT]
+    if schema_hint:
+        prompt_parts.append(schema_hint)
+    if history_lines:
+        prompt_parts.append(history_lines)
+    prompt_parts.append(f'User input: "{question}"')
+    prompt_parts.append("Reply with JSON only.")
+    prompt = "\n".join(prompt_parts)
 
     try:
         response = gemini_client.models.generate_content(
@@ -1195,13 +1196,14 @@ def ask_openrouter_classification(question: str, history: list | None = None) ->
         for h in history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
-    prompt = (
-        f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
-        f"{schema_hint}\n" if schema_hint else ""
-        f"{history_lines}\n"
-        f"User input: \"{question}\"\n"
-        "Reply with JSON only."
-    )
+    prompt_parts = [CLASSIFICATION_SYSTEM_PROMPT]
+    if schema_hint:
+        prompt_parts.append(schema_hint)
+    if history_lines:
+        prompt_parts.append(history_lines)
+    prompt_parts.append(f'User input: "{question}"')
+    prompt_parts.append("Reply with JSON only.")
+    prompt = "\n".join(prompt_parts)
 
     try:
         response = _openrouter_request({
@@ -1235,6 +1237,8 @@ def ask_openrouter_classification(question: str, history: list | None = None) ->
 def ask_ollama_classification(question: str, history: list | None = None) -> dict:
     """Classify user intent using a locally running Ollama model."""
     model = AI_OLLAMA_MODEL
+    print(f"[DEBUG] ask_ollama_classification() called with question: {question!r}")
+    print(f"[DEBUG] Ollama base URL: {AI_OLLAMA_BASE_URL}, model: {model}")
     schema_hint = _build_classification_schema_hint()
     history_lines = ""
     if history:
@@ -1242,15 +1246,20 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
         for h in history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
-    prompt = (
-        f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
-        f"{schema_hint}\n" if schema_hint else ""
-        f"{history_lines}\n"
-        f"User input: \"{question}\"\n"
-        "Reply with JSON only."
-    )
+    prompt_parts = [CLASSIFICATION_SYSTEM_PROMPT]
+    if schema_hint:
+        prompt_parts.append(schema_hint)
+    if history_lines:
+        prompt_parts.append(history_lines)
+    prompt_parts.append(f'User input: "{question}"')
+    prompt_parts.append("Reply with JSON only.")
+    prompt = "\n".join(prompt_parts)
+    print(f"[DEBUG] Classification prompt (first 200 chars): {prompt[:200]}")
+    print(f"[DEBUG] Does prompt contain 'User input:'? {'User input:' in prompt}")
+    print(f"[DEBUG] Does prompt contain question? {question in prompt}")
 
     try:
+        print(f"[DEBUG] About to send request to Ollama...")
         response = _ollama_request({
             "model": model,
             "messages": [
@@ -1259,6 +1268,7 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
             ],
             "temperature": 0.0,
         })
+        print(f"[DEBUG] Ollama responded! Status: {response.status_code}")
         body = response.json()
         text = ""
         if isinstance(body, dict):
@@ -1266,18 +1276,30 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
             if choices:
                 msg = choices[0].get("message") or {}
                 text = (msg.get("content") or "").strip()
+        print(f"[DEBUG] Ollama classification response text: {text[:300]!r}")
         if not text:
+            print(f"[DEBUG] Empty response from Ollama - returning fallback")
             return {"category": "db_query", "rewrite": question, "reason": "empty response"}
-        return _parse_classification_response(text)
-    except Exception as e:
-        print(f"ask_ollama_classification error: {e}")
+        result = _parse_classification_response(text)
+        print(f"[DEBUG] Parsed classification result: {result}")
+        return result
+    except requests.exceptions.ConnectionError as e:
+        print(f"[DEBUG] Ollama CONNECTION ERROR: {e}")
+        print(f"[DEBUG] This means Ollama is NOT running at {AI_OLLAMA_BASE_URL}!")
         if gemini_client:
-            print("Ollama classification unavailable, falling back to Gemini classification.")
+            print("Ollama unavailable, falling back to Gemini.")
             return ask_gemini_classification(question, history)
-        return {"category": "db_query", "rewrite": question, "reason": "error"}
+        return {"category": "db_query", "rewrite": question, "reason": "error: Ollama not reachable"}
+    except Exception as e:
+        print(f"[DEBUG] ask_ollama_classification error ({type(e).__name__}): {e}")
+        if gemini_client:
+            print("Ollama classification unavailable, falling back to Gemini.")
+            return ask_gemini_classification(question, history)
+        return {"category": "db_query", "rewrite": question, "reason": f"error: {e}"}
 
 
 def ask_classification(question: str, history: list | None = None) -> dict:
+    print(f"[DEBUG] ask_classification() dispatching to provider: {AI_PROVIDER}")
     if AI_PROVIDER == "ollama":
         return ask_ollama_classification(question, history)
     if AI_PROVIDER == "openrouter":
@@ -2089,11 +2111,13 @@ def query():
         return jsonify({"error": "Missing 'question' in request body"}), 400
 
     question = data["question"].strip()
+    print(f"[DEBUG] query() called with question: {question!r}")
     if not question:
         return jsonify({"error": "Question cannot be empty"}), 400
 
     # Stage 1: relevance check
     relevance = check_relevance(question, _conversation_history)
+    print(f"[DEBUG] Stage 1 - check_relevance result: {relevance}")
     if not relevance["relevant"]:
         return jsonify({
             "is_relevant": False,
@@ -2103,6 +2127,7 @@ def query():
             "columns": [],
         })
 
+    print(f"[DEBUG] Stage 1 passed - question is relevant. Proceeding to Stage 2 (classification)")
     # Stage 2: classify the intent and handle non-query inputs.
     classification = ask_classification(question, _conversation_history)
     category = classification.get("category", "db_query")
