@@ -48,9 +48,6 @@
                     <h1>AI Database Searcher</h1>
                 </div>
                 <div class="header-right">
-                    <span class="header-pill">DB: <strong class="db-name-text" id="currentDbNameHeader">Unknown</strong></span>
-                    <button class="header-pill open-db-manager">Manage DB</button>
-                    <button class="header-pill db-schema-summary" id="dbSchemaSummaryHeader" title="Click to explore schema">Schema: loading...</button>
                     <button class="theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
                         <svg class="sun-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
@@ -214,16 +211,6 @@
         const schemaSummary = document.getElementById('dbSchemaSummary');
         const schemaPanel = document.getElementById('schemaPanel');
         const schemaPanelBody = document.getElementById('schemaPanelBody');
-        const schemaSummaryHeader = document.getElementById('dbSchemaSummaryHeader');
-
-        // Sync header schema pill click to the control-row one
-        if (schemaSummaryHeader) {
-            schemaSummaryHeader.addEventListener('click', function(e) {
-                e.preventDefault();
-                schemaSummary.click();
-            });
-        }
-
         // State
         let isLoading = false;
         let isSidebarOpen = false;

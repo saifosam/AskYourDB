@@ -26,7 +26,7 @@ load_dotenv()
 app = Flask(__name__)
 app.jinja_env.auto_reload = True
 DATABASES_DIR = "databases"
-DEFAULT_DB_FILENAME = "default.db"
+DEFAULT_DB_FILENAME = "northwind.db"
 DEFAULT_DB_PATH = os.path.join(DATABASES_DIR, DEFAULT_DB_FILENAME)
 
 os.makedirs(DATABASES_DIR, exist_ok=True)
