@@ -24,6 +24,7 @@ from werkzeug.utils import secure_filename
 load_dotenv()
 
 app = Flask(__name__)
+app.jinja_env.auto_reload = True
 DATABASES_DIR = "databases"
 DEFAULT_DB_FILENAME = "default.db"
 DEFAULT_DB_PATH = os.path.join(DATABASES_DIR, DEFAULT_DB_FILENAME)
@@ -352,27 +353,101 @@ CLASSIFICATION_SYSTEM_PROMPT = (
 
 def _build_classification_schema_hint() -> str:
     """Build a compact, fast schema summary for classification prompts.
-    Returns just table names + 2-3 key text column names per table,
-    so the classifier knows what content exists without the full schema.
+
+    Designed to be parseable by a small 7B local model:
+    - Lists tables with their 2-3 most useful text columns
+    - Adds parenthesized semantic hints for ambiguous column purposes
+    - Skips ID columns (CustomerID, ProductID, etc.) and numeric-only columns
+    - Marks junction tables with a short description ("links X to Y")
+    - Includes FK relationships so the model understands table connections
+    - Stays under ~800 chars for fast local inference
+
+    Returns empty string if no tables exist.
     """
     info = get_table_info()
     if not info:
         return ""
-    lines = ["--- Available tables & their text columns ---"]
+    fks = get_foreign_keys()
+
+    # Build FK summary per table: {table: ["→ ReferencesTable", ...]}
+    fk_map: dict[str, list[str]] = {}
+    for fk in fks:
+        t = fk["table"]
+        if t not in fk_map:
+            fk_map[t] = []
+        fk_map[t].append(f"→ {fk['references_table']}")
+
+    lines = ["--- Available tables ---"]
     for table in sorted(info.keys()):
         cols = info[table]
-        # Find text-ish columns (names, titles, descriptions)
-        text_cols = [
-            c["name"] for c in cols
-            if c["type"] and any(t in c["type"].upper() for t in ("CHAR", "CLOB", "TEXT", "VARCHAR"))
-        ]
-        # If no text columns found, just show the first 3 columns
-        if not text_cols:
-            text_cols = [c["name"] for c in cols[:3]]
-        # Show up to 3 key text columns
-        shown = text_cols[:3]
-        col_str = ", ".join(shown)
-        lines.append(f"  {table}: {col_str}")
+        col_count = len(cols)
+
+        # Classify each column
+        name_like = []   # "company name", "product name" etc.
+        desc_like = []   # descriptions, addresses, free text
+        numeric_like = []  # price, quantity, discount etc.
+
+        for c in cols:
+            cname = c["name"]
+            ctype = (c["type"] or "").upper()
+            cname_lower = cname.lower().replace(" ", "").replace("_", "")
+
+            # Skip pure ID columns (CustomerID, ProductID, etc.)
+            if cname_lower.endswith("id") and len(cname) <= 20:
+                continue
+            # Skip numeric/boolean columns by type — generic, works for any DB
+            if ctype and any(t in ctype for t in ("INT", "REAL", "FLOAT", "NUMERIC", "DECIMAL", "BOOLEAN", "BIT")):
+                if not any(t in ctype for t in ("CHAR", "CLOB", "TEXT", "VARCHAR")):
+                    continue
+
+            is_text = any(t in ctype for t in ("CHAR", "CLOB", "TEXT", "VARCHAR"))
+
+            # Determine semantic purpose
+            if is_text:
+                if any(k in cname_lower for k in ("name", "company", "product", "category", "contact")):
+                    # Add semantic hint
+                    if "contacttitle" in cname_lower:
+                        name_like.append(f"{cname} (job title)")
+                    elif "contactname" in cname_lower or "firstname" in cname_lower or "lastname" in cname_lower:
+                        name_like.append(f"{cname} (person name)")
+                    elif "company" in cname_lower:
+                        name_like.append(f"{cname} (company name)")
+                    elif "productname" in cname_lower:
+                        name_like.append(f"{cname} (item name)")
+                    elif "categoryname" in cname_lower:
+                        name_like.append(f"{cname} (category name)")
+                    else:
+                        name_like.append(cname)
+                elif any(k in cname_lower for k in ("address", "description", "desc", "notes", "region")):
+                    desc_like.append(cname)
+                else:
+                    desc_like.append(cname)
+
+        # Build the column display string (max 3 columns total)
+        display_cols = (name_like + desc_like)[:3]
+
+        # Build the table line
+        table_line = f"  {table}"
+
+        # Detect junction tables generically: ≤6 cols with ≥2 ID/FK columns → likely a link table
+        id_cols = [c["name"] for c in cols if c["name"].lower().replace(" ", "").replace("_", "").endswith("id")]
+        is_junction = col_count <= 6 and len(id_cols) >= 2
+
+        if is_junction:
+            linked = [cname.replace("ID", "").replace("Id", "") for cname in id_cols]
+            if linked:
+                table_line += f" (links {' & '.join(linked)})"
+
+        if display_cols:
+            table_line += f" → {', '.join(display_cols)}"
+
+        # Add FK hints (compact)
+        if table in fk_map:
+            fk_str = ", ".join(fk_map[table])
+            table_line += f" [{fk_str}]"
+
+        lines.append(table_line)
+
     return "\n".join(lines)
 
 # SYSTEM PROMPT: generate SQL or deny if the question is unrelated or the data is not available.
@@ -1079,6 +1154,7 @@ def ask_gemini_classification(question: str, history: list | None = None) -> dic
         return {"category": "db_query", "rewrite": question, "reason": "Gemini unavailable"}
 
     model = AI_GOOGLE_MODEL
+    schema_hint = _build_classification_schema_hint()
     history_lines = ""
     if history:
         history_lines = "\nHistory:\n"
@@ -1087,6 +1163,7 @@ def ask_gemini_classification(question: str, history: list | None = None) -> dic
 
     prompt = (
         f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
+        f"{schema_hint}\n" if schema_hint else ""
         f"{history_lines}\n"
         f"User input: \"{question}\"\n"
         "Reply with JSON only."
@@ -1111,6 +1188,7 @@ def ask_openrouter_classification(question: str, history: list | None = None) ->
         return {"category": "db_query", "rewrite": question, "reason": "OpenRouter unavailable"}
 
     model = AI_OPENROUTER_MODEL
+    schema_hint = _build_classification_schema_hint()
     history_lines = ""
     if history:
         history_lines = "\nHistory:\n"
@@ -1119,6 +1197,7 @@ def ask_openrouter_classification(question: str, history: list | None = None) ->
 
     prompt = (
         f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
+        f"{schema_hint}\n" if schema_hint else ""
         f"{history_lines}\n"
         f"User input: \"{question}\"\n"
         "Reply with JSON only."
@@ -1156,6 +1235,7 @@ def ask_openrouter_classification(question: str, history: list | None = None) ->
 def ask_ollama_classification(question: str, history: list | None = None) -> dict:
     """Classify user intent using a locally running Ollama model."""
     model = AI_OLLAMA_MODEL
+    schema_hint = _build_classification_schema_hint()
     history_lines = ""
     if history:
         history_lines = "\nHistory:\n"
@@ -1164,6 +1244,7 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
 
     prompt = (
         f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
+        f"{schema_hint}\n" if schema_hint else ""
         f"{history_lines}\n"
         f"User input: \"{question}\"\n"
         "Reply with JSON only."
