@@ -304,8 +304,14 @@
             document.querySelectorAll('.db-schema-summary').forEach(el => {
                 el.classList.toggle('active', isSchemaOpen);
             });
-            if (isSchemaOpen && !schemaData) loadSchemaExplorer();
-            if (isSchemaOpen) scrollToBottom();
+            if (isSchemaOpen) {
+                if (schemaData) {
+                    renderSchemaExplorer(schemaData);
+                } else {
+                    loadSchemaExplorer();
+                }
+                scrollToBottom();
+            }
         }
 
         async function loadSchemaExplorer() {
