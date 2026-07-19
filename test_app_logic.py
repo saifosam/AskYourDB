@@ -149,6 +149,69 @@ def test_tokenize_text():
     assert "show" in tokens
 
 
+def test_normalize_tokens_with_plurals_film():
+    """'films' should normalize to include 'film' (simple -s plural)."""
+    tokens = app_module.tokenize_text("top 5 most expensive films")
+    normalized = app_module._normalize_tokens_with_plurals(tokens)
+    assert "films" in normalized, "Original token must remain"
+    assert "film" in normalized, "films should produce singular form film"
+
+
+def test_normalize_tokens_with_plurals_customers():
+    """'customers' should normalize to include 'customer' (simple -s plural)."""
+    tokens = app_module.tokenize_text("all customers from Germany")
+    normalized = app_module._normalize_tokens_with_plurals(tokens)
+    assert "customers" in normalized
+    assert "customer" in normalized, "customers should produce singular form customer"
+
+
+def test_normalize_tokens_with_plurals_categories():
+    """'categories' should normalize to include 'category' (-ies -> -y plural)."""
+    tokens = app_module.tokenize_text("list all categories")
+    normalized = app_module._normalize_tokens_with_plurals(tokens)
+    assert "categories" in normalized
+    assert "category" in normalized, "categories should produce singular form category"
+
+
+def test_normalize_tokens_with_plurals_addresses():
+    """'addresses' should normalize to include 'address' (-es plural)."""
+    tokens = app_module.tokenize_text("show me all addresses")
+    normalized = app_module._normalize_tokens_with_plurals(tokens)
+    assert "addresses" in normalized
+    assert "address" in normalized, "addresses should produce singular form address"
+
+
+def test_normalize_tokens_with_plurals_class_preserved():
+    """'class' (not actually a plural) should remain as-is."""
+    tokens = app_module.tokenize_text("working class")
+    normalized = app_module._normalize_tokens_with_plurals(tokens)
+    assert "class" in normalized, "class must remain in normalized set"
+    # Stripping trailing 's' from 'class' would produce 'clas', but the original
+    # token must still be present so exact matches still work
+    assert "clas" in normalized, "class produces stem 'clas' (harmless extra entry)"
+
+
+def test_normalize_tokens_with_plurals_bias_preserved():
+    """'bias' (not actually a plural) should remain as-is."""
+    tokens = app_module.tokenize_text("bias in data")
+    normalized = app_module._normalize_tokens_with_plurals(tokens)
+    assert "bias" in normalized, "bias must remain in normalized set"
+    assert "bia" in normalized, "bias produces stem 'bia' (harmless extra entry)"
+
+
+def test_normalize_tokens_with_plurals_singular_preserved():
+    """Already-singular tokens should remain in the set unchanged."""
+    tokens = app_module.tokenize_text("show me film actor address category")
+    normalized = app_module._normalize_tokens_with_plurals(tokens)
+    for word in ("film", "actor", "address", "category"):
+        assert word in normalized, f"'{word}' must remain in normalized set"
+
+
+def test_normalize_tokens_with_plurals_empty():
+    """Empty set should remain empty."""
+    assert app_module._normalize_tokens_with_plurals(set()) == set()
+
+
 def test_quote_sql_value_simple():
     assert app_module.quote_sql_value("Hello") == "'Hello'"
 
@@ -1051,3 +1114,47 @@ def test_generate_sql_identical_twice_with_same_db_state():
         )
     finally:
         app_module._conversation_history = old_history
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  REGRESSION TESTS FOR GREETING & MOVIE FIXES
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_greeting_passes_relevance_check():
+    """Bare greetings like 'hello' must pass check_relevance()
+    so they can reach the AI classification stage. (Regression.)"""
+    for greeting in ['hello', 'hi', 'hey', 'good morning', 'greetings']:
+        result = app_module.check_relevance(greeting)
+        assert result["relevant"] is True, (
+            f"Greeting '{greeting}' should be relevant, got: {result}"
+        )
+        assert result["reason"] == "Greeting"
+
+
+def test_greeting_with_punctuation_passes_relevance():
+    """Greetings with trailing punctuation must still pass."""
+    result = app_module.check_relevance("hello!")
+    assert result["relevant"] is True
+    assert result["reason"] == "Greeting"
+
+
+def test_movie_query_not_blocked_by_relevance():
+    """Questions about movies should NOT be blocked by check_relevance.
+    'movie' was removed from irrelevant_keywords for cross-schema support."""
+    result = app_module.check_relevance("give me all the movies with action in the name")
+    assert result["relevant"] is True, (
+        f"Movie query should not be blocked by relevance check, got: {result}"
+    )
+
+
+def test_classification_prompt_contains_generic_synonyms_no_northwind():
+    """The CLASSIFICATION_SYSTEM_PROMPT should use 'approximates'
+    instead of Unicode arrows, and should not reference specific
+    Northwind table names in synonym mappings."""
+    prompt = app_module.CLASSIFICATION_SYSTEM_PROMPT
+    # Should NOT contain Unicode arrows or em dashes
+    assert '\u2248' not in prompt, "Prompt should not contain Unicode 'approximately equal to'"
+    assert '\u2014' not in prompt, "Prompt should not contain Unicode em dash"
+    # Should contain common-sense directive
+    assert "Common-sense rule" in prompt
+    assert "conceptually related" in prompt.lower()

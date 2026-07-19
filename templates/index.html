@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Database Searcher</title>
+    <title>AskYourDB</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -41,11 +41,13 @@
                         </svg>
                     </button>
                     <div class="logo-icon">
-                        <svg viewBox="0 0 20 20" fill="none">
-                            <path d="M10 2L12.5 7.5L18 8.5L14 12.5L15 18L10 15.5L5 18L6 12.5L2 8.5L7.5 7.5L10 2Z" fill="currentColor"/>
+                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
+                            <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
+                            <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
                         </svg>
                     </div>
-                    <h1>AI Database Searcher</h1>
+                    <h1>AskYourDB</h1>
                 </div>
                 <div class="header-right">
                     <button class="theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
@@ -79,8 +81,10 @@
                 <!-- Welcome message -->
                 <div class="message bot-message">
                     <div class="avatar bot-avatar">
-                        <svg viewBox="0 0 20 20" fill="none">
-                            <path d="M10 2L12.5 7.5L18 8.5L14 12.5L15 18L10 15.5L5 18L6 12.5L2 8.5L7.5 7.5L10 2Z" fill="currentColor"/>
+                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
+                            <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
+                            <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
                         </svg>
                     </div>
                     <div class="message-content">
@@ -440,16 +444,17 @@
             const div = document.createElement('div');
             div.className = 'message bot-message';
             div.id = id;
-            div.innerHTML = `
-                <div class="avatar bot-avatar">
-                    <svg viewBox="0 0 20 20" fill="none">
-                        <path d="M10 2L12.5 7.5L18 8.5L14 12.5L15 18L10 15.5L5 18L6 12.5L2 8.5L7.5 7.5L10 2Z" fill="currentColor"/>
-                    </svg>
-                </div>
-                <div class="message-content">
-                    <div class="message-header">
-                        <span class="message-author">Data Agent</span>
-                        <span class="message-time">working...</span>
+            div.innerHTML = `                            <div class="avatar bot-avatar">
+                                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
+                                    <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
+                                    <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
+                                </svg>
+                            </div>
+                            <div class="message-content">
+                                <div class="message-header">
+                                    <span class="message-author">Data Agent</span>
+                                    <span class="message-time">working...</span>
                     </div>
                     <div class="message-bubble bot-bubble loading-bubble" id="${id}-bubble">
                         ${LOADING_STAGES.map(s => `

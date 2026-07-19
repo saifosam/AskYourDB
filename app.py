@@ -1,5 +1,5 @@
 """
-AI Database Searcher - Backend
+AskYourDB - Backend
 Flask app with NL-to-SQL engine for an attached SQLite database
 """
 
@@ -342,16 +342,24 @@ CLASSIFICATION_SYSTEM_PROMPT = (
     "Do not include extra text.\n"
     "--- Generic synonym hints ---\n"
     "Think about everyday synonyms for whatever table names are listed below.\n"
-    "For example: people/individuals/clients ≈ any table representing persons\n"
+    "For example: people/individuals/clients approximates any table representing persons\n"
     "(employees, customers, actors, staff, users, etc.)\n"
-    "items/goods/products ≈ any product/inventory-like table\n"
-    "transactions/purchases/orders ≈ any order/rental/payment-like table\n"
-    "places/locations/addresses ≈ any geography table\n"
-    "movies/films/titles ≈ any media/content table\n"
-    "groups/types/categories ≈ any classification table\n"
+    "items/goods/products approximates any product/inventory-like table\n"
+    "transactions/purchases/orders approximates any order/rental/payment-like table\n"
+    "places/locations/addresses approximates any geography table\n"
+    "movies/films/titles approximates any media/content table\n"
+    "groups/types/categories approximates any classification table\n"
     "The '--- Available tables' section below lists EVERY valid query target. "
     "If the user mentions a table name listed there, or an everyday synonym "
-    "for one of those tables, it IS a valid db_query — do NOT mark it irrelevant."
+    "for one of those tables, it IS a valid db_query - do NOT mark it irrelevant.\n"
+    "--- Common-sense rule ---\n"
+    "Common sense: if the question describes something conceptually related to "
+    "ANY table or its data (e.g. a 'movie' relates to a table about films/videos; "
+    "'weather' does not), treat it as db_query, not irrelevant. "
+    "When in doubt, prefer db_query over irrelevant.\n"
+    "The user is asking about the ATTACHED database. If the question could "
+    "conceivably be answered by querying tables in the schema, it is db_query.\n"
+    "Only mark something irrelevant if it is TRULY unrelated (e.g. politics, weather, news, math)."
 )
 
 
@@ -379,7 +387,7 @@ def _build_classification_schema_hint() -> str:
         t = fk["table"]
         if t not in fk_map:
             fk_map[t] = []
-        fk_map[t].append(f"→ {fk['references_table']}")
+        fk_map[t].append(f"-> {fk['references_table']}")
 
     lines = ["--- Available tables (ALL of these are valid query targets) ---"]
     for table in sorted(info.keys()):
@@ -451,7 +459,7 @@ def _build_classification_schema_hint() -> str:
                 table_line += f" (links {' & '.join(linked)})"
 
         if display_cols:
-            table_line += f" → {', '.join(display_cols)}"
+            table_line += f" -> {', '.join(display_cols)}"
 
         # Add FK hints (compact)
         if table in fk_map:
@@ -781,6 +789,23 @@ def tokenize_text(text: str) -> set:
     return set(normalize_text(text).split())
 
 
+def _normalize_tokens_with_plurals(tokens: set) -> set:
+    """Return a set that includes both original tokens and their singular forms
+    (stripped trailing 's'). This allows 'films' to match schema token 'film'."""
+    result = set(tokens)
+    for t in tokens:
+        # Strip trailing 's' for simple plurals (e.g. films->film, customers->customer)
+        if t.endswith('s') and len(t) > 3:
+            result.add(t[:-1])
+        # Handle -ies plurals (e.g. categories->category)
+        if t.endswith('ies') and len(t) > 4:
+            result.add(t[:-3] + 'y')
+        # Handle -es plurals (e.g. addresses->address)
+        if t.endswith('es') and len(t) > 4 and not t.endswith('ies'):
+            result.add(t[:-2])
+    return result
+
+
 def _schema_tokens() -> set:
     info = get_table_info()
     tokens = set()
@@ -807,10 +832,16 @@ def check_relevance(question: str, history: list | None = None) -> dict:
     if not q:
         return {"relevant": False, "reason": "Please enter a question."}
 
-    q_lower = q.lower()
+    q_lower = q.lower().strip().rstrip('!.,?')
+
+    # Greetings must always pass through to AI classification (never blocked here)
+    greeting_words = {'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'greetings', 'howdy'}
+    if q_lower in greeting_words:
+        return {"relevant": True, "reason": "Greeting"}
+
     irrelevant_keywords = [
         'weather', 'temperature', 'forecast', 'news', 'time', 'date', 'joke',
-        'movie', 'sport', 'sports', 'recipe', 'recipe', 'song', 'music video',
+        'sport', 'sports', 'recipe', 'recipe', 'song', 'music video',
         'how are you', 'bing', 'google', 'twitter', 'facebook', 'stock',
         'price of bitcoin', 'exchange rate', 'currency', 'election', 'politics',
     ]
@@ -820,8 +851,11 @@ def check_relevance(question: str, history: list | None = None) -> dict:
     schema_tokens = _schema_tokens()
     if schema_tokens and tokenize_text(q) & schema_tokens:
         return {"relevant": True, "reason": "Relevant"}
+    # Also check with plural/singular normalization so "films" matches "film"
+    if schema_tokens and _normalize_tokens_with_plurals(tokenize_text(q)) & schema_tokens:
+        return {"relevant": True, "reason": "Relevant"}
 
-    question_words = re.search(r'\b(what|who|where|when|how|show|find|list|count|give me|display)\b', q_lower)
+    question_words = re.search(r'\b(what|who|where|when|how|show|find|list|count|give me|display|top|highest|lowest|most|least|best|worst|cheapest|expensive|average|maximum|minimum|first|last)\b', q_lower)
     if question_words:
         return {"relevant": True, "reason": "Relevant"}
 
@@ -1096,7 +1130,7 @@ def ask_ollama(question: str) -> dict:
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
-            "options": {"num_ctx": 8192},
+            "options": {"num_ctx": 8192, "seed": 0},
             "max_tokens": 2048,
         })
         body = response.json()
@@ -1281,6 +1315,7 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
+            "options": {"seed": 0},
         })
         print(f"[DEBUG] Ollama responded! Status: {response.status_code}")
         body = response.json()
@@ -2276,9 +2311,10 @@ def query():
             "columns": [],
         })
 
-    print(f"[DEBUG] Stage 1 passed - question is relevant. Proceeding to Stage 2 (classification)")
+    print(f"[STAGE_LOG] query() stage=1 (relevance_check) provider={AI_PROVIDER} question={question!r} result=passed")
     # Stage 2: classify the intent and handle non-query inputs.
     classification = ask_classification(question, _conversation_history)
+    print(f"[STAGE_LOG] query() stage=2 (classification) provider={AI_PROVIDER} category={classification.get('category', 'unknown')} question={question!r}")
     category = classification.get("category", "db_query")
 
     # If the AI says irrelevant but the question looks like a short follow-up with
@@ -2319,8 +2355,11 @@ def query():
         question = classification["rewrite"].strip()
     else:
         question = rewrite_followup_question(question, _conversation_history)
+    print(f"[STAGE_LOG] query() stage=3 (followup_rewrite) question={question!r}")
     availability = check_data_availability(question)
     if not availability["available"]:
+        print(f"[STAGE_LOG] query() stage=3b (data_availability) result=denied")
+        
         return jsonify({
             "is_relevant": False,
             "reason": availability["reason"],
@@ -2331,6 +2370,7 @@ def query():
 
     # Use configured AI provider and fall back to rule-based SQL generation when needed.
     result = ask_ai(question)
+    print(f"[STAGE_LOG] query() stage=4 (ai_sql_generation) action={result['action']} provider={AI_PROVIDER}")
     if result["action"] == "DENY":
         return jsonify({
             "is_relevant": False,
@@ -2351,6 +2391,7 @@ def query():
     if not sql:
         sql = generate_sql(question)
         source = "fallback_rules"
+        print(f"[STAGE_LOG] query() stage=5 (fallback_sql_generation) sql={sql[:80]!r}")
 
     # Handle no-match response from the fallback engine before safety validation
     if sql and sql.startswith("NO_MATCH:"):
@@ -2373,11 +2414,26 @@ def query():
         })
 
     try:
+        print(f"[STAGE_LOG] query() stage=6 (execute_sql) sql={sql[:100]!r}")
         columns, results = execute_sql(sql)
+
+        # Check for revenue/sum/aggregate queries returning empty results (e.g. date filters with no matching data)
+        if not results and ('SUM(' in sql.upper() or 'COUNT(' in sql.upper()) and any(term in sql.upper() for term in ('WHERE', 'BETWEEN', 'YEAR(')):
+            print(f"[STAGE_LOG] query() stage=6b (empty_aggregate_detected)")
+            return jsonify({
+                "is_relevant": True,
+                "sql": sql,
+                "source": source,
+                "columns": columns,
+                "results": [],
+                "message": "No data found for the specified period. (The query itself is correct - there are simply no matching rows.)"
+            })
+
         # Save to history for follow-up questions
         _conversation_history.append({"q": question, "sql": sql})
         if len(_conversation_history) > MAX_HISTORY:
             _conversation_history.pop(0)
+        print(f"[STAGE_LOG] query() stage=6 (execute_sql_complete) rows={len(results)}")
         return jsonify({
             "is_relevant": True,
             "sql": sql,
@@ -2386,6 +2442,7 @@ def query():
             "results": results,
         })
     except Exception as e:
+        print(f"[STAGE_LOG] query() stage=6 (execute_sql_error) error={e!r}")
         return jsonify({
             "error": str(e),
             "is_relevant": True,
