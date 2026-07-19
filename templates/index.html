@@ -3,72 +3,143 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Database Searcher</title>
+    <title>AskYourDB</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div id="app">
-        <!-- Header -->
-        <header class="chat-header">
-            <div class="header-left">
-                <div class="logo-icon">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                        <path d="M10 2L12.5 7.5L18 8.5L14 12.5L15 18L10 15.5L5 18L6 12.5L2 8.5L7.5 7.5L10 2Z" fill="currentColor"/>
-                    </svg>
-                </div>
-                <h1>AI Database Searcher</h1>
-            </div>
-            <div class="header-right">
-                <div class="db-pill">DB: <strong id="currentDbName">Unknown</strong></div>
-                <button id="openDbManagerButton" class="db-button">Manage DB</button>
-                <div class="db-schema-summary" id="dbSchemaSummary">Schema: loading...</div>
-            </div>
-        </header>
-        <input id="dbFileInput" type="file" accept=".db,.sqlite,.sqlite3" hidden />
-
-        <!-- Messages Area -->
-        <main class="messages-container" id="messagesContainer">
-            <!-- Welcome message -->
-            <div class="message bot-message">
-                <div class="avatar bot-avatar">
-                    <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
-                        <path d="M10 2L12.5 7.5L18 8.5L14 12.5L15 18L10 15.5L5 18L6 12.5L2 8.5L7.5 7.5L10 2Z" fill="currentColor"/>
-                    </svg>
-                </div>
-                <div class="message-content">
-                    <div class="message-bubble bot-bubble welcome-bubble">
-                        <p>👋 Hi! I can query the attached SQLite database using natural language. Ask me any question about the available tables and records.</p>
-                    </div>
-                </div>
-            </div>
-        </main>
-
-        <!-- Loading Indicator (full-width during query) -->
+    <div id="app" class="app-layout">
+        <!-- Loading Bar -->
         <div class="loading-overlay" id="loadingOverlay">
             <div class="loading-bar"></div>
         </div>
 
-        <!-- Input Area -->
-        <footer class="input-area">
-            <div class="input-wrapper">
-                <textarea
-                    id="questionInput"
-                    class="question-input"
-                    placeholder="Ask a question about the database..."
-                    rows="1"
-                    autofocus
-                ></textarea>
-                <button id="sendButton" class="send-button" disabled aria-label="Send">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="22" y1="2" x2="11" y2="13"></line>
-                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        <div class="content-row">
+        <!-- ═══ SIDEBAR ═══ -->
+        <aside class="sidebar" id="sidebar" aria-label="Query history">
+            <div class="sidebar-header">
+                <div class="sidebar-title-row">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                     </svg>
-                </button>
+                    <span>History</span>
+                </div>
+                <button class="sidebar-close" id="sidebarClose" aria-label="Close sidebar">×</button>
             </div>
-            <p class="disclaimer">Natural language to SQL · Powered by AI</p>
-        </footer>
+            <div class="sidebar-body" id="sidebarBody">
+                <div class="sidebar-empty">No queries yet. Ask a question to get started.</div>
+            </div>
+        </aside>
+
+        <!-- ═══ MAIN CONTENT ═══ -->
+        <div class="main-area">
+            <!-- Thin Top Bar -->
+            <header class="chat-header">
+                <div class="header-left">
+                    <button class="btn-icon sidebar-toggle" id="sidebarToggle" aria-label="Toggle history sidebar" title="Query history">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+                        </svg>
+                    </button>
+                    <div class="logo-icon">
+                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
+                            <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
+                            <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
+                        </svg>
+                    </div>
+                    <h1>AskYourDB</h1>
+                </div>
+                <div class="header-right">
+                    <button class="theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
+                        <svg class="sun-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                        </svg>
+                        <svg class="moon-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Schema Explorer Panel (collapsible) -->
+            <div class="schema-panel collapsed" id="schemaPanel">
+                <div class="schema-panel-header">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    <span>Database Schema</span>
+                </div>
+                <div class="schema-panel-body" id="schemaPanelBody">
+                    <div class="schema-loading">Loading schema...</div>
+                </div>
+            </div>
+
+            <input id="dbFileInput" type="file" accept=".db,.sqlite,.sqlite3" hidden />
+
+            <!-- Messages Area -->
+            <main class="messages-container" id="messagesContainer">
+                <!-- Welcome message -->
+                <div class="message bot-message">
+                    <div class="avatar bot-avatar">
+                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
+                            <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
+                            <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
+                        </svg>
+                    </div>
+                    <div class="message-content">
+                        <div class="message-header">
+                            <span class="message-author">Data Agent</span>
+                            <span class="message-time">just now</span>
+                        </div>
+                        <div class="message-bubble bot-bubble welcome-bubble">
+                            <p>👋 Hi! I can query the attached SQLite database using natural language. Ask me any question about the available tables and records.</p>
+                            <ul class="suggestions" id="welcomeSuggestions"></ul>
+                        </div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- Scroll to Bottom Button -->
+            <button class="scroll-bottom-btn" id="scrollBottomBtn" onclick="scrollToBottom()" title="Scroll to bottom" aria-label="Scroll to bottom">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"/>
+                    <polyline points="19 12 12 19 5 12"/>
+                </svg>
+            </button>
+
+            <!-- Composer — Floating card -->
+            <div class="composer-wrapper">
+                <div class="composer-card">
+                    <textarea
+                        id="questionInput"
+                        class="composer-input"
+                        placeholder="Ask a question about the database..."
+                        rows="1"
+                        autofocus
+                    ></textarea>
+                    <div class="composer-controls">
+                        <div class="composer-controls-left">
+                            <span class="db-pill">DB: <strong class="db-name-text" id="currentDbName">Unknown</strong></span>
+                            <button class="control-pill open-db-manager">Manage</button>
+                            <button class="db-schema-summary control-pill" id="dbSchemaSummary" title="Click to explore schema">Schema: loading...</button>
+                        </div>
+                        <button id="sendButton" class="composer-send" disabled>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                            </svg>
+                            Send
+                        </button>
+                    </div>
+                </div>
+                <div class="composer-helper">Natural language to SQL &middot; Powered by AI</div>
+            </div>
+        </div>
+    </div>
     </div>
 
+    <!-- Database Manager Modal -->
     <div class="db-modal" id="dbModal" aria-hidden="true">
         <div class="db-modal-backdrop" id="dbModalBackdrop"></div>
         <div class="db-modal-panel" role="dialog" aria-modal="true" aria-labelledby="dbModalTitle">
@@ -94,19 +165,66 @@
     </div>
 
     <script>
-        // ── DOM References ──────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════
+        //  Theme Toggle
+        // ═══════════════════════════════════════════════════════════════════
+        (function initTheme() {
+            const saved = localStorage.getItem('askyourdb-theme');
+            const theme = saved || 'light';
+            document.documentElement.setAttribute('data-theme', theme);
+        })();
+
+        const themeToggle = document.getElementById('themeToggle');
+        themeToggle.addEventListener('click', function() {
+            const html = document.documentElement;
+            const current = html.getAttribute('data-theme') || 'light';
+            const next = current === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', next);
+            localStorage.setItem('askyourdb-theme', next);
+            // Toggle icon visibility
+            const sunIcon = this.querySelector('.sun-icon');
+            const moonIcon = this.querySelector('.moon-icon');
+            if (sunIcon && moonIcon) {
+                sunIcon.style.display = next === 'light' ? '' : 'none';
+                moonIcon.style.display = next === 'dark' ? '' : 'none';
+            }
+        });
+
+        // Show correct icon on load
+        (function showThemeIcon() {
+            const theme = document.documentElement.getAttribute('data-theme') || 'light';
+            const sunIcon = document.querySelector('.sun-icon');
+            const moonIcon = document.querySelector('.moon-icon');
+            if (sunIcon && moonIcon) {
+                sunIcon.style.display = theme === 'light' ? '' : 'none';
+                moonIcon.style.display = theme === 'dark' ? '' : 'none';
+            }
+        })();
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  DOM References
+        // ═══════════════════════════════════════════════════════════════════
         const messagesContainer = document.getElementById('messagesContainer');
         const questionInput = document.getElementById('questionInput');
         const sendButton = document.getElementById('sendButton');
         const loadingOverlay = document.getElementById('loadingOverlay');
-
+        const sidebar = document.getElementById('sidebar');
+        const sidebarToggle = document.getElementById('sidebarToggle');
+        const sidebarClose = document.getElementById('sidebarClose');
+        const sidebarBody = document.getElementById('sidebarBody');
+        const schemaSummary = document.getElementById('dbSchemaSummary');
+        const schemaPanel = document.getElementById('schemaPanel');
+        const schemaPanelBody = document.getElementById('schemaPanelBody');
         // State
         let isLoading = false;
+        let isSidebarOpen = false;
+        let isSchemaOpen = false;
+        let schemaData = null;
 
         // ── Auto-resize textarea ────────────────────────────────────────
         questionInput.addEventListener('input', function () {
             this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
             sendButton.disabled = !this.value.trim() || isLoading;
         });
 
@@ -121,34 +239,167 @@
         // ── Send on button click ────────────────────────────────────────
         sendButton.addEventListener('click', sendQuery);
 
+        // ═══════════════════════════════════════════════════════════════════
+        //  Query History Sidebar
+        // ═══════════════════════════════════════════════════════════════════
+        sidebarToggle.addEventListener('click', toggleSidebar);
+        sidebarClose.addEventListener('click', toggleSidebar);
+
+        function toggleSidebar() {
+            isSidebarOpen = !isSidebarOpen;
+            sidebar.classList.toggle('open', isSidebarOpen);
+            if (isSidebarOpen) loadSidebarHistory();
+        }
+
+        async function loadSidebarHistory() {
+            try {
+                const res = await fetch('/history');
+                const history = await res.json();
+                renderSidebarHistory(history);
+            } catch (e) {
+                sidebarBody.innerHTML = '<div class="sidebar-empty">Failed to load history.</div>';
+            }
+        }
+
+        function renderSidebarHistory(history) {
+            if (!history || history.length === 0) {
+                sidebarBody.innerHTML = '<div class="sidebar-empty">No queries yet. Ask a question to get started.</div>';
+                return;
+            }
+            sidebarBody.innerHTML = '';
+            const reversed = [...history].reverse();
+            reversed.forEach((item) => {
+                const el = document.createElement('div');
+                el.className = 'history-item';
+                const preview = item.q.length > 55 ? item.q.slice(0, 55) + '…' : item.q;
+                el.innerHTML = `
+                    <div class="history-q">${escapeHtml(preview)}</div>
+                    <div class="history-meta">${escapeHtml((item.sql || '').slice(0, 35))}${(item.sql || '').length > 35 ? '…' : ''}</div>
+                `;
+                el.addEventListener('click', () => {
+                    questionInput.value = item.q;
+                    questionInput.style.height = 'auto';
+                    questionInput.style.height = Math.min(questionInput.scrollHeight, 120) + 'px';
+                    sendButton.disabled = false;
+                    questionInput.focus();
+                    setTimeout(() => sendQuery(), 300);
+                });
+                sidebarBody.appendChild(el);
+            });
+            const clearBtn = document.createElement('button');
+            clearBtn.className = 'history-clear';
+            clearBtn.textContent = 'Clear history';
+            clearBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                sidebarBody.innerHTML = '<div class="sidebar-empty">No queries yet.</div>';
+            });
+            sidebarBody.appendChild(clearBtn);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Schema Explorer
+        // ═══════════════════════════════════════════════════════════════════
+        schemaSummary.addEventListener('click', toggleSchemaExplorer);
+
+        function toggleSchemaExplorer() {
+            isSchemaOpen = !isSchemaOpen;
+            schemaPanel.classList.toggle('collapsed', !isSchemaOpen);
+            // Toggle active state on ALL schema summary elements
+            document.querySelectorAll('.db-schema-summary').forEach(el => {
+                el.classList.toggle('active', isSchemaOpen);
+            });
+            if (isSchemaOpen) {
+                if (schemaData) {
+                    renderSchemaExplorer(schemaData);
+                } else {
+                    loadSchemaExplorer();
+                }
+                scrollToBottom();
+            }
+        }
+
+        async function loadSchemaExplorer() {
+            schemaPanelBody.innerHTML = '<div class="schema-loading">Loading schema...</div>';
+            try {
+                const res = await fetch('/schema');
+                schemaData = await res.json();
+                renderSchemaExplorer(schemaData);
+            } catch (e) {
+                schemaPanelBody.innerHTML = '<div class="schema-loading">Failed to load schema.</div>';
+            }
+        }
+
+        function renderSchemaExplorer(data) {
+            if (!data || Object.keys(data).length === 0) {
+                schemaPanelBody.innerHTML = '<div class="schema-loading">No tables found.</div>';
+                return;
+            }
+            schemaPanelBody.innerHTML = '';
+            Object.entries(data).forEach(([table, cols]) => {
+                const tableEl = document.createElement('div');
+                tableEl.className = 'schema-table';
+                tableEl.innerHTML = `
+                    <div class="schema-table-header">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                        </svg>
+                        <span class="schema-table-name">${escapeHtml(table)}</span>
+                        <span class="schema-table-meta">${cols.length} col${cols.length !== 1 ? 's' : ''}</span>
+                    </div>
+                    <div class="schema-columns">
+                        ${cols.map(c => {
+                            const type = (c.type || 'unknown').toLowerCase();
+                            let typeClass = 'schema-type-other';
+                            if (/char|clob|text|varchar/i.test(type)) typeClass = 'schema-type-text';
+                            else if (/int|integer/i.test(type)) typeClass = 'schema-type-int';
+                            else if (/real|float|double|numeric|decimal|money/i.test(type)) typeClass = 'schema-type-num';
+                            return `<div class="schema-column">
+                                <span class="schema-col-name">${escapeHtml(c.name)}</span>
+                                <span class="schema-col-type ${typeClass}">${escapeHtml(type)}</span>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                `;
+                schemaPanelBody.appendChild(tableEl);
+            });
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  Per-stage Loading Animation
+        // ═══════════════════════════════════════════════════════════════════
+        const LOADING_STAGES = [
+            { step: 1, label: 'Checking relevance...' },
+            { step: 2, label: 'Classifying intent...' },
+            { step: 3, label: 'Analyzing schema...' },
+            { step: 4, label: 'Generating SQL...' },
+            { step: 5, label: 'Running query...' },
+        ];
+
         // ── Main send function ──────────────────────────────────────────
-        async function sendQuery() {
-            const question = questionInput.value.trim();
+        async function sendQuery(questionOverride) {
+            const question = questionOverride || questionInput.value.trim();
             if (!question || isLoading) return;
 
             isLoading = true;
             sendButton.disabled = true;
             questionInput.disabled = true;
 
-            // Add user message
             addUserMessage(question);
             questionInput.value = '';
             questionInput.style.height = 'auto';
 
-            // Show loading overlay
             loadingOverlay.classList.add('active');
 
-            // Add initial loading message (already shows step 1: "Generating SQL...")
-            const loadingMsgId = addLoadingMessage();
+            const loadingMsgId = addStageLoadingMessage();
 
             try {
-                // Small delay so the user sees "Generating SQL..."
-                await sleep(800);
+                await sleep(400);
+                completeStage(loadingMsgId, 1);
+                await sleep(500);
+                completeStage(loadingMsgId, 2);
+                await sleep(600);
+                completeStage(loadingMsgId, 3);
 
-                // Mark step 1 as completed and add step 2
-                animateLoadingStep(loadingMsgId, 2, 'Running query...');
-
-                // Call the backend
                 const response = await fetch('/query', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -156,13 +407,14 @@
                 });
 
                 const data = await response.json();
+                completeStage(loadingMsgId, 4);
 
                 if (!response.ok) {
                     throw new Error(data.error || `Server error (${response.status})`);
                 }
 
                 if (data.is_relevant === false) {
-                    replaceLoadingWithWarning(loadingMsgId, data.error || 'Question is not relevant to the database.');
+                    replaceLoadingWithWarning(loadingMsgId, data.reason || 'Question is not relevant to the database.');
                     return;
                 }
 
@@ -170,10 +422,11 @@
                     throw new Error(data.error);
                 }
 
-                // Replace loading message with results
+                await sleep(400);
+                completeStage(loadingMsgId, 5);
+
                 replaceLoadingWithResults(loadingMsgId, data);
             } catch (error) {
-                // Replace loading with error
                 replaceLoadingWithError(loadingMsgId, error.message || 'An unexpected error occurred');
             } finally {
                 isLoading = false;
@@ -181,7 +434,67 @@
                 sendButton.disabled = !questionInput.value.trim();
                 questionInput.disabled = false;
                 questionInput.focus();
+                if (isSidebarOpen) loadSidebarHistory();
             }
+        }
+
+        // ── Per-stage Loading Message ───────────────────────────────────
+        function addStageLoadingMessage() {
+            const id = 'loading-' + Date.now();
+            const div = document.createElement('div');
+            div.className = 'message bot-message';
+            div.id = id;
+            div.innerHTML = `                            <div class="avatar bot-avatar">
+                                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
+                                    <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
+                                    <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
+                                </svg>
+                            </div>
+                            <div class="message-content">
+                                <div class="message-header">
+                                    <span class="message-author">Data Agent</span>
+                                    <span class="message-time">working...</span>
+                    </div>
+                    <div class="message-bubble bot-bubble loading-bubble" id="${id}-bubble">
+                        ${LOADING_STAGES.map(s => `
+                            <div class="loading-stage" data-stage="${s.step}">
+                                <span class="stage-dot"></span>
+                                <span class="stage-label">${s.label}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+            messagesContainer.appendChild(div);
+            scrollToBottom();
+
+            const firstStage = div.querySelector('[data-stage="1"]');
+            if (firstStage) firstStage.classList.add('active');
+
+            return id;
+        }
+
+        function completeStage(msgId, stageNum) {
+            const bubble = document.getElementById(msgId + '-bubble');
+            if (!bubble) return;
+
+            const stage = bubble.querySelector(`[data-stage="${stageNum}"]`);
+            if (stage) {
+                stage.classList.remove('active');
+                stage.classList.add('completed');
+                const dot = stage.querySelector('.stage-dot');
+                if (dot) {
+                    dot.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+                }
+            }
+
+            const nextStage = bubble.querySelector(`[data-stage="${stageNum + 1}"]`);
+            if (nextStage) {
+                nextStage.classList.add('active');
+            }
+
+            scrollToBottom();
         }
 
         // ── Add user message ────────────────────────────────────────────
@@ -193,71 +506,13 @@
                     <div class="message-bubble user-bubble">${escapeHtml(text)}</div>
                 </div>
                 <div class="avatar user-avatar">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
                         <circle cx="12" cy="7" r="4"></circle>
                     </svg>
                 </div>
             `;
             messagesContainer.appendChild(div);
-            scrollToBottom();
-        }
-
-        // ── Add loading message ─────────────────────────────────────────
-        function addLoadingMessage() {
-            const id = 'loading-' + Date.now();
-            const div = document.createElement('div');
-            div.className = 'message bot-message';
-            div.id = id;
-            div.innerHTML = `
-                <div class="avatar bot-avatar">
-                    <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
-                        <path d="M10 2L12.5 7.5L18 8.5L14 12.5L15 18L10 15.5L5 18L6 12.5L2 8.5L7.5 7.5L10 2Z" fill="currentColor"/>
-                    </svg>
-                </div>
-                <div class="message-content">
-                    <div class="message-bubble bot-bubble loading-bubble">
-                        <div class="loading-step" data-step="1">
-                            <span class="spinner"></span>
-                            <span>Generating SQL...</span>
-                        </div>
-                    </div>
-                </div>
-            `;
-            messagesContainer.appendChild(div);
-            scrollToBottom();
-            return id;
-        }
-
-        // ── Animate loading step ────────────────────────────────────────
-        function animateLoadingStep(msgId, step, text) {
-            const msgEl = document.getElementById(msgId);
-            if (!msgEl) return;
-
-            const loadingBubble = msgEl.querySelector('.loading-bubble');
-            if (!loadingBubble) return;
-
-            // Mark previous steps as done
-            const prevSteps = loadingBubble.querySelectorAll('.loading-step');
-            prevSteps.forEach(s => {
-                if (parseInt(s.dataset.step) < step) {
-                    s.classList.add('completed');
-                    const spinner = s.querySelector('.spinner');
-                    if (spinner) {
-                        spinner.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
-                        spinner.classList.remove('spinner');
-                        spinner.classList.add('checkmark');
-                    }
-                }
-            });
-
-            // Add the new step
-            const stepDiv = document.createElement('div');
-            stepDiv.className = 'loading-step';
-            stepDiv.dataset.step = step;
-            stepDiv.innerHTML = `<span class="spinner"></span><span>${text}</span>`;
-            loadingBubble.appendChild(stepDiv);
-
             scrollToBottom();
         }
 
@@ -273,22 +528,30 @@
             const bubble = msgEl.querySelector('.loading-bubble');
             if (!bubble) return;
 
-            // Start building the results content
             let html = '';
 
-            // Row count
             const rowCount = results.length;
             html += `<div class="result-meta">Returned <strong>${rowCount}</strong> row${rowCount !== 1 ? 's' : ''}</div>`;
 
-            // Collapsible SQL block
+            // Collapsible SQL block with Copy button
             html += `
                 <div class="sql-block">
-                    <button class="sql-toggle" onclick="toggleSql(this)">
-                        <svg class="sql-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="9 18 15 12 9 6"></polyline>
-                        </svg>
-                        <span>Show SQL</span>
-                    </button>
+                    <div class="sql-toolbar">
+                        <button class="sql-toggle" onclick="toggleSql(this)">
+                            <svg class="sql-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                            <span>Show SQL</span>
+                        </button>
+                        <div class="sql-actions">
+                            <button class="sql-action-btn" onclick="copySql(this)" title="Copy SQL to clipboard" aria-label="Copy SQL">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                                </svg>
+                                <span>Copy SQL</span>
+                            </button>
+                        </div>
+                    </div>
                     <div class="sql-content collapsed">
                         <pre><code class="language-sql">${escapeHtml(sql)}</code></pre>
                     </div>
@@ -298,15 +561,13 @@
             // Results table
             if (results.length > 0 && columns.length > 0) {
                 html += '<div class="results-table-wrapper"><table class="results-table">';
-                // Header
                 html += '<thead><tr>';
                 columns.forEach(col => {
                     html += `<th>${escapeHtml(formatColumnName(col))}</th>`;
                 });
                 html += '</tr></thead>';
-                // Body
                 html += '<tbody>';
-                results.forEach(row => {
+                results.forEach((row) => {
                     html += '<tr>';
                     columns.forEach(col => {
                         const val = row[col];
@@ -316,13 +577,107 @@
                 });
                 html += '</tbody>';
                 html += '</table></div>';
+
+                html += `
+                    <div class="export-actions">
+                        <button class="export-btn" onclick="downloadCsv(this)" data-columns='${escapeHtml(JSON.stringify(columns))}' data-results='${escapeHtml(JSON.stringify(results))}'>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span>Download CSV</span>
+                        </button>
+                    </div>
+                `;
             } else if (results.length === 0) {
                 html += '<div class="empty-results">No results found. Try a different question.</div>';
+                html += '<div class="suggestion-row" id="suggestions-' + Date.now() + '"></div>';
+            }
+
+            // Update the time on the message header
+            const headerTime = msgEl.querySelector('.message-time');
+            if (headerTime) {
+                headerTime.textContent = getRelativeTime();
             }
 
             bubble.innerHTML = html;
             scrollToBottom();
+
+            if (results.length === 0) {
+                loadSuggestions(msgId);
+            }
+
+            // Add action row
+            addMessageActions(msgEl, sql);
         }
+
+        // ── Add action buttons under assistant message ──────────────────
+        function addMessageActions(msgEl, sql) {
+            const content = msgEl.querySelector('.message-content');
+            if (!content) return;
+
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'message-actions';
+            actionsDiv.innerHTML = `
+                <button class="msg-action-btn" onclick="handleAction(this, 'thumbs-up')" title="Good response" aria-label="Thumbs up">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/>
+                    </svg>
+                </button>
+                <button class="msg-action-btn" onclick="handleAction(this, 'thumbs-down')" title="Bad response" aria-label="Thumbs down">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h2.67A2.31 2.31 0 0 1 22 4v7a2.31 2.31 0 0 1-2.33 2H17"/>
+                    </svg>
+                </button>
+                <button class="msg-action-btn" onclick="copyMessageText(this)" title="Copy response" aria-label="Copy response">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                    </svg>
+                </button>
+            `;
+            content.appendChild(actionsDiv);
+        }
+
+        // ── Message action handlers ─────────────────────────────────────
+        window.handleAction = function(btn, type) {
+            // Toggle active state for thumbs
+            if (type === 'thumbs-up' || type === 'thumbs-down') {
+                const parent = btn.closest('.message-actions');
+                const siblings = parent.querySelectorAll('.msg-action-btn');
+                siblings.forEach(s => s.classList.remove('active'));
+                btn.classList.add('active');
+            }
+        };
+
+        window.copyMessageText = function(btn) {
+            // Find the message text content and copy it
+            const msgEl = btn.closest('.message');
+            const bubble = msgEl.querySelector('.message-bubble');
+            // Get just the text content (not the SQL block or table)
+            let text = '';
+            const meta = bubble.querySelector('.result-meta');
+            if (meta) {
+                text = meta.textContent + '\n';
+            }
+            const textNodes = [];
+            bubble.childNodes.forEach(node => {
+                if (node.nodeType === Node.TEXT_NODE || (node.nodeType === Node.ELEMENT_NODE && !node.closest('.sql-block') && !node.closest('.results-table-wrapper') && !node.closest('.suggestion-row') && !node.closest('.export-actions') && !node.closest('.empty-results'))) {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        textNodes.push(node.textContent.trim());
+                    } else if (!node.classList.contains('sql-block') && !node.classList.contains('results-table-wrapper') && !node.classList.contains('suggestion-row') && !node.classList.contains('export-actions')) {
+                        textNodes.push(node.textContent.trim());
+                    }
+                }
+            });
+            text = textNodes.filter(t => t).join(' ');
+
+            if (!text) text = bubble.textContent.trim();
+
+            navigator.clipboard.writeText(text).then(() => {
+                const original = btn.innerHTML;
+                btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+                setTimeout(() => { btn.innerHTML = original; }, 2000);
+            });
+        };
 
         // ── Replace loading with error ──────────────────────────────────
         function replaceLoadingWithError(msgId, errorMsg) {
@@ -332,7 +687,10 @@
             const bubble = msgEl.querySelector('.loading-bubble');
             if (!bubble) return;
 
-            bubble.className = 'message-bubble bot-bubble error-bubble';
+            const headerTime = msgEl.querySelector('.message-time');
+            if (headerTime) headerTime.textContent = getRelativeTime();
+
+            bubble.className = 'message-bubble error-bubble';
             bubble.innerHTML = `
                 <div class="error-header">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -345,6 +703,7 @@
                 <p class="error-message">${escapeHtml(errorMsg)}</p>
                 <p class="error-hint">Try rephrasing your question or making it more specific.</p>
             `;
+            addMessageActions(msgEl, '');
             scrollToBottom();
         }
 
@@ -356,7 +715,11 @@
             const bubble = msgEl.querySelector('.loading-bubble');
             if (!bubble) return;
 
-            bubble.className = 'message-bubble bot-bubble warning-bubble';
+            const headerTime = msgEl.querySelector('.message-time');
+            if (headerTime) headerTime.textContent = getRelativeTime();
+
+            const warnId = 'warn-suggest-' + Date.now();
+            bubble.className = 'message-bubble warning-bubble';
             bubble.innerHTML = `
                 <div class="warning-header">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -367,14 +730,161 @@
                     <span>Irrelevant Question</span>
                 </div>
                 <p class="warning-message">${escapeHtml(warningMsg)}</p>
-                <p class="warning-hint">Please ask questions related to the attached database schema.</p>
+                <p class="warning-hint">Your question may use terms not found in the database. Try asking about one of these tables:</p>
+                <div class="suggestion-row" id="${warnId}">
+                    <div class="suggestion-chips-placeholder">Loading suggestions...</div>
+                </div>
             `;
+            loadWarningSuggestions(warnId);
+            addMessageActions(msgEl, '');
             scrollToBottom();
         }
 
+        // ── Load suggestion chips for rejected/irrelevant questions ────
+        async function loadWarningSuggestions(containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            try {
+                const res = await fetch('/schema');
+                const data = await res.json();
+                if (!data) return;
+                const tables = Object.keys(data);
+                if (tables.length === 0) return;
+                const chips = tables.slice(0, 6).map(t => `show me all ${t.toLowerCase()}`);
+                container.innerHTML = `
+                    <div class="suggestion-chips">
+                        ${chips.map(text =>
+                            `<button class="suggestion-chip" onclick="useSuggestion('${escapeHtml(text)}')">${escapeHtml(text)}</button>`
+                        ).join('')}
+                    </div>
+                `;
+                scrollToBottom();
+            } catch (e) {
+                container.innerHTML = '';
+            }
+        }
+
+        // ── Load suggestion hints for empty results ────────────────────
+        async function loadSuggestions(msgId) {
+            const msgEl = document.getElementById(msgId);
+            if (!msgEl) return;
+
+            const suggestionRow = msgEl.querySelector('.suggestion-row');
+            if (!suggestionRow) return;
+
+            try {
+                const res = await fetch('/schema');
+                const data = await res.json();
+                if (!data) return;
+
+                const hints = [];
+                for (const [table, cols] of Object.entries(data)) {
+                    const textCols = cols.filter(c => c.type && /char|clob|text|varchar/i.test(c.type));
+                    for (const col of textCols.slice(0, 3)) {
+                        hints.push({ table, column: col.name, label: `${table}.${col.name}` });
+                    }
+                }
+                const showHints = hints.slice(0, 8);
+
+                if (showHints.length === 0) return;
+
+                suggestionRow.innerHTML = `
+                    <div class="suggestion-title">💡 Try searching these columns:</div>
+                    <div class="suggestion-chips">
+                        ${showHints.map(h => `
+                            <button class="suggestion-chip" onclick="useSuggestion('${escapeHtml(h.label)}')">${escapeHtml(h.label)}</button>
+                        `).join('')}
+                    </div>
+                `;
+                scrollToBottom();
+            } catch (e) {
+            }
+        }
+
+        // Click a suggestion chip to auto-fill and send
+        window.useSuggestion = function(label) {
+            if (label.includes('.')) {
+                const parts = label.toLowerCase().split('.');
+                questionInput.value = `show me all ${parts[0]} with their ${parts[1]}`;
+            } else {
+                questionInput.value = label;
+            }
+            questionInput.style.height = 'auto';
+            questionInput.style.height = Math.min(questionInput.scrollHeight, 120) + 'px';
+            sendButton.disabled = false;
+            setTimeout(() => sendQuery(), 300);
+        };
+
+        // ── Copy SQL to clipboard ────────────────────────────────────────
+        window.copySql = function(btn) {
+            const sqlBlock = btn.closest('.sql-block');
+            if (!sqlBlock) return;
+            const code = sqlBlock.querySelector('code');
+            if (!code) return;
+
+            const text = code.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const span = btn.querySelector('span');
+                const original = span.textContent;
+                span.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    span.textContent = original;
+                    btn.classList.remove('copied');
+                }, 2000);
+            }).catch(() => {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                const span = btn.querySelector('span');
+                span.textContent = 'Copied!';
+                setTimeout(() => { span.textContent = 'Copy SQL'; }, 2000);
+            });
+        };
+
+        // ── Download CSV ─────────────────────────────────────────────────
+        window.downloadCsv = function(btn) {
+            try {
+                const columns = JSON.parse(btn.dataset.columns);
+                const results = JSON.parse(btn.dataset.results);
+                if (!columns || !results || results.length === 0) return;
+
+                const header = columns.map(c => '"' + c.replace(/"/g, '""') + '"').join(',');
+                const rows = results.map(row =>
+                    columns.map(col => {
+                        const val = row[col];
+                        if (val === null || val === undefined) return '';
+                        const str = String(val).replace(/"/g, '""');
+                        return '"' + str + '"';
+                    }).join(',')
+                );
+                const csv = [header, ...rows].join('\\n');
+
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'query-results.csv';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                const span = btn.querySelector('span');
+                const original = span.textContent;
+                span.textContent = 'Downloaded!';
+                setTimeout(() => { span.textContent = original; }, 2000);
+            } catch (e) {
+                console.error('CSV download failed', e);
+            }
+        };
+
         // ── Toggle SQL visibility ───────────────────────────────────────
         window.toggleSql = function(btn) {
-            const content = btn.nextElementSibling;
+            const content = btn.closest('.sql-block').querySelector('.sql-content');
             const chevron = btn.querySelector('.sql-chevron');
             const span = btn.querySelector('span');
             const isCollapsed = content.classList.contains('collapsed');
@@ -400,7 +910,6 @@
         }
 
         function formatColumnName(name) {
-            // Convert camelCase or PascalCase to readable text
             return name
                 .replace(/([A-Z])/g, ' $1')
                 .replace(/^./, s => s.toUpperCase())
@@ -408,30 +917,58 @@
                 .trim();
         }
 
+        function getRelativeTime() {
+            const d = new Date();
+            const h = d.getHours();
+            const m = d.getMinutes().toString().padStart(2, '0');
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            const hour12 = h % 12 || 12;
+            return hour12 + ':' + m + ' ' + ampm;
+        }
+
         function sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
         }
 
         function scrollToBottom() {
-            requestAnimationFrame(() => {
-                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-            });
+            setTimeout(() => {
+                const last = messagesContainer.lastElementChild;
+                if (last) {
+                    last.scrollIntoView({ block: 'end', behavior: 'instant' });
+                } else {
+                    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                }
+            }, 30);
         }
+
+        // ── Scroll-to-bottom button visibility ────────────────────────
+        messagesContainer.addEventListener('scroll', function () {
+            const threshold = 100;
+            const atBottom = this.scrollHeight - this.scrollTop - this.clientHeight < threshold;
+            const btn = document.getElementById('scrollBottomBtn');
+            if (btn) {
+                btn.classList.toggle('visible', !atBottom);
+            }
+        });
 
         // ── Initial focus ───────────────────────────────────────────────
         questionInput.focus();
 
-        // ── Database Manager UI ──────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════
+        //  Database Manager UI
+        // ═══════════════════════════════════════════════════════════════════
         const dbModal = document.getElementById('dbModal');
         const dbModalBackdrop = document.getElementById('dbModalBackdrop');
-        const openDbManagerButton = document.getElementById('openDbManagerButton');
         const closeDbModalButton = document.getElementById('closeDbModal');
         const dbUploadButton = document.getElementById('dbUploadButton');
         const dbFileInput = document.getElementById('dbFileInput');
         const dbList = document.getElementById('dbList');
         const currentDbName = document.getElementById('currentDbName');
 
-        openDbManagerButton.addEventListener('click', openDbModal);
+        // Bind all .open-db-manager buttons to open the modal
+        document.querySelectorAll('.open-db-manager').forEach(btn => {
+            btn.addEventListener('click', openDbModal);
+        });
         closeDbModalButton.addEventListener('click', closeDbModal);
         dbModalBackdrop.addEventListener('click', closeDbModal);
         dbUploadButton.addEventListener('click', () => dbFileInput.click());
@@ -452,7 +989,10 @@
             try {
                 const res = await fetch('/databases');
                 const data = await res.json();
-                currentDbName.textContent = data.current || 'Unknown';
+                // Update all DB name elements
+                document.querySelectorAll('.db-name-text').forEach(el => {
+                    el.textContent = data.current || 'Unknown';
+                });
                 renderDatabaseList(data);
                 await loadSchemaSummary();
             } catch (error) {
@@ -464,14 +1004,34 @@
             try {
                 const res = await fetch('/schema');
                 const data = await res.json();
-                const summary = Object.keys(data)
-                    .slice(0, 4)
-                    .join(', ');
-                const more = Object.keys(data).length > 4 ? '...' : '';
-                document.getElementById('dbSchemaSummary').textContent = summary ? `Schema: ${summary}${more}` : 'Schema: empty';
+                const tables = Object.keys(data);
+                const summary = tables.slice(0, 4).join(', ');
+                const more = tables.length > 4 ? ` +${tables.length - 4} more` : '';
+                schemaSummary.textContent = summary ? `Schema: ${summary}${more}` : 'Schema: empty';
+                schemaData = data;
             } catch (error) {
-                document.getElementById('dbSchemaSummary').textContent = 'Schema: unavailable';
+                schemaSummary.textContent = 'Schema: unavailable';
                 console.error('Schema load failed', error);
+            }
+        }
+
+        async function loadWelcomeSuggestions() {
+            try {
+                const res = await fetch('/schema');
+                const data = await res.json();
+                if (!data) return;
+                const tables = Object.keys(data);
+                if (tables.length === 0) return;
+                const chips = [];
+                for (const table of tables.slice(0, 5)) {
+                    chips.push(`show me all ${table.toLowerCase()}`);
+                }
+                const container = document.getElementById('welcomeSuggestions');
+                if (!container) return;
+                container.innerHTML = chips.map(text =>
+                    `<li class="suggestion-chip" onclick="useSuggestion('${escapeHtml(text)}')">${escapeHtml(text)}</li>`
+                ).join('');
+            } catch (e) {
             }
         }
 
@@ -522,11 +1082,11 @@
                     body: formData,
                 });
                 const data = await res.json();
-                if (!res.ok) {
-                    throw new Error(data.error || 'Upload failed');
-                }
+                if (!res.ok) throw new Error(data.error || 'Upload failed');
                 await loadDatabaseList();
-                currentDbName.textContent = data.current || currentDbName.textContent;
+                document.querySelectorAll('.db-name-text').forEach(el => {
+                    el.textContent = data.current || 'Unknown';
+                });
             } catch (error) {
                 console.error('Upload failed', error);
                 alert('Failed to upload database. Please try again.');
@@ -543,10 +1103,10 @@
                     body: JSON.stringify({ filename }),
                 });
                 const data = await res.json();
-                if (!res.ok) {
-                    throw new Error(data.error || 'Selection failed');
-                }
-                currentDbName.textContent = data.current || currentDbName.textContent;
+                if (!res.ok) throw new Error(data.error || 'Selection failed');
+                document.querySelectorAll('.db-name-text').forEach(el => {
+                    el.textContent = data.current || 'Unknown';
+                });
                 await loadDatabaseList();
                 closeDbModal();
             } catch (error) {
@@ -562,9 +1122,7 @@
                     method: 'DELETE',
                 });
                 const data = await res.json();
-                if (!res.ok) {
-                    throw new Error(data.error || 'Delete failed');
-                }
+                if (!res.ok) throw new Error(data.error || 'Delete failed');
                 await loadDatabaseList();
             } catch (error) {
                 console.error('Delete failed', error);
@@ -572,7 +1130,9 @@
             }
         }
 
+        // Init
         loadDatabaseList();
+        loadWelcomeSuggestions();
     </script>
 </body>
 </html>

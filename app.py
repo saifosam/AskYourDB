@@ -1,5 +1,5 @@
 """
-AI Database Searcher - Backend
+AskYourDB - Backend
 Flask app with NL-to-SQL engine for an attached SQLite database
 """
 
@@ -11,15 +11,22 @@ import sqlite3
 import requests
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+# Google Gemini SDK (optional — gracefully handled if not installed)
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
+
 from werkzeug.utils import secure_filename
 
 load_dotenv()
 
 app = Flask(__name__)
+app.jinja_env.auto_reload = True
 DATABASES_DIR = "databases"
-DEFAULT_DB_FILENAME = "default.db"
+DEFAULT_DB_FILENAME = "northwind.db"
 DEFAULT_DB_PATH = os.path.join(DATABASES_DIR, DEFAULT_DB_FILENAME)
 
 os.makedirs(DATABASES_DIR, exist_ok=True)
@@ -332,14 +339,150 @@ CLASSIFICATION_SYSTEM_PROMPT = (
     "followup, db_query, irrelevant. If the input is a follow-up, "
     "also rewrite it into a full standalone database question using the history. "
     "Return exactly one JSON object with keys: category, rewrite, reason. "
-    "Do not include extra text."
+    "Do not include extra text.\n"
+    "--- Generic synonym hints ---\n"
+    "Think about everyday synonyms for whatever table names are listed below.\n"
+    "For example: people/individuals/clients approximates any table representing persons\n"
+    "(employees, customers, actors, staff, users, etc.)\n"
+    "items/goods/products approximates any product/inventory-like table\n"
+    "transactions/purchases/orders approximates any order/rental/payment-like table\n"
+    "places/locations/addresses approximates any geography table\n"
+    "movies/films/titles approximates any media/content table\n"
+    "groups/types/categories approximates any classification table\n"
+    "The '--- Available tables' section below lists EVERY valid query target. "
+    "If the user mentions a table name listed there, or an everyday synonym "
+    "for one of those tables, it IS a valid db_query - do NOT mark it irrelevant.\n"
+    "--- Common-sense rule ---\n"
+    "Common sense: if the question describes something conceptually related to "
+    "ANY table or its data (e.g. a 'movie' relates to a table about films/videos; "
+    "'weather' does not), treat it as db_query, not irrelevant. "
+    "When in doubt, prefer db_query over irrelevant.\n"
+    "The user is asking about the ATTACHED database. If the question could "
+    "conceivably be answered by querying tables in the schema, it is db_query.\n"
+    "Only mark something irrelevant if it is TRULY unrelated (e.g. politics, weather, news, math)."
 )
+
+
+def _build_classification_schema_hint() -> str:
+    """Build a compact, fast schema summary for classification prompts.
+
+    Designed to be parseable by a small 7B local model:
+    - Lists tables with their 2-3 most useful text columns
+    - Adds parenthesized semantic hints for ambiguous column purposes
+    - Skips ID columns (CustomerID, ProductID, etc.) and numeric-only columns
+    - Marks junction tables with a short description ("links X to Y")
+    - Includes FK relationships so the model understands table connections
+    - Stays under ~800 chars for fast local inference
+
+    Returns empty string if no tables exist.
+    """
+    info = get_table_info()
+    if not info:
+        return ""
+    fks = get_foreign_keys()
+
+    # Build FK summary per table: {table: ["→ ReferencesTable", ...]}
+    fk_map: dict[str, list[str]] = {}
+    for fk in fks:
+        t = fk["table"]
+        if t not in fk_map:
+            fk_map[t] = []
+        fk_map[t].append(f"-> {fk['references_table']}")
+
+    lines = ["--- Available tables (ALL of these are valid query targets) ---"]
+    for table in sorted(info.keys()):
+        cols = info[table]
+        col_count = len(cols)
+
+        # Classify each column
+        name_like = []   # "company name", "product name" etc.
+        desc_like = []   # descriptions, addresses, free text
+        numeric_like = []  # price, quantity, discount etc.
+
+        for c in cols:
+            cname = c["name"]
+            ctype = (c["type"] or "").upper()
+            cname_lower = cname.lower().replace(" ", "").replace("_", "")
+
+            # Never skip purely on name — also keep columns whose name is the
+            # same as the table (e.g. table "city" with column "city") so the
+            # model sees the connection.
+            is_table_name_column = (cname_lower == table.lower().replace(" ", "").replace("_", ""))
+
+            # Skip pure ID columns (CustomerID, ProductID, etc.)
+            if cname_lower.endswith("id") and len(cname) <= 20 and not is_table_name_column:
+                continue
+            # Skip numeric/boolean columns by type — generic, works for any DB
+            if ctype and any(t in ctype for t in ("INT", "REAL", "FLOAT", "NUMERIC", "DECIMAL", "BOOLEAN", "BIT")):
+                if not any(t in ctype for t in ("CHAR", "CLOB", "TEXT", "VARCHAR")) and not is_table_name_column:
+                    continue
+
+            is_text = any(t in ctype for t in ("CHAR", "CLOB", "TEXT", "VARCHAR"))
+
+            # Determine semantic purpose
+            if is_text:
+                if any(k in cname_lower for k in ("name", "company", "product", "category", "contact")):
+                    # Add semantic hint
+                    if "contacttitle" in cname_lower:
+                        name_like.append(f"{cname} (job title)")
+                    elif "contactname" in cname_lower or "firstname" in cname_lower or "lastname" in cname_lower:
+                        name_like.append(f"{cname} (person name)")
+                    elif "company" in cname_lower:
+                        name_like.append(f"{cname} (company name)")
+                    elif "productname" in cname_lower:
+                        name_like.append(f"{cname} (item name)")
+                    elif "categoryname" in cname_lower:
+                        name_like.append(f"{cname} (category name)")
+                    else:
+                        name_like.append(cname)
+                elif any(k in cname_lower for k in ("address", "description", "desc", "notes", "region")):
+                    desc_like.append(cname)
+                else:
+                    desc_like.append(cname)
+            elif is_table_name_column:
+                # Keep column even if non-text when it matches the table name
+                name_like.append(cname)
+
+        # Build the column display string (max 3 columns total)
+        display_cols = (name_like + desc_like)[:3]
+
+        # Build the table line
+        table_line = f"  {table}"
+
+        # Detect junction tables generically: ≤6 cols with ≥2 ID/FK columns → likely a link table
+        id_cols = [c["name"] for c in cols if c["name"].lower().replace(" ", "").replace("_", "").endswith("id")]
+        is_junction = col_count <= 6 and len(id_cols) >= 2
+
+        if is_junction:
+            linked = [cname.replace("ID", "").replace("Id", "") for cname in id_cols]
+            if linked:
+                table_line += f" (links {' & '.join(linked)})"
+
+        if display_cols:
+            table_line += f" -> {', '.join(display_cols)}"
+
+        # Add FK hints (compact)
+        if table in fk_map:
+            fk_str = ", ".join(fk_map[table])
+            table_line += f" [{fk_str}]"
+
+        lines.append(table_line)
+
+    hint = "\n".join(lines)
+    print(f"[DEBUG] _build_classification_schema_hint() output:\n{hint}")
+    return hint
 
 # SYSTEM PROMPT: generate SQL or deny if the question is unrelated or the data is not available.
 SQL_SYSTEM_PROMPT = (
     "You are a professional assistant for the attached SQLite database. Respond only with either: "
     "SQL: <sqlite SELECT query> or DENY: <reason>. Do not invent columns or data. "
-    "If the question is unrelated to the database, respond with DENY."
+    "If the question is unrelated to the database, respond with DENY.\n"
+    "--- Column guidance ---\n"
+    "Do NOT search ContactTitle or ContactName for product, category, food or item names.\n"
+    "If the question asks about a product, category, or item name (like a food name), "
+    "search ProductName or CategoryName, not customer/employee/contact fields.\n"
+    "ContactTitle is a person's job title. ContactName is a person's full name.\n"
+    "When the user asks for 'company names' use CompanyName from the Customers table."
 )
 
 # Conversation history for follow-up questions (last 5 turns)
@@ -646,6 +789,23 @@ def tokenize_text(text: str) -> set:
     return set(normalize_text(text).split())
 
 
+def _normalize_tokens_with_plurals(tokens: set) -> set:
+    """Return a set that includes both original tokens and their singular forms
+    (stripped trailing 's'). This allows 'films' to match schema token 'film'."""
+    result = set(tokens)
+    for t in tokens:
+        # Strip trailing 's' for simple plurals (e.g. films->film, customers->customer)
+        if t.endswith('s') and len(t) > 3:
+            result.add(t[:-1])
+        # Handle -ies plurals (e.g. categories->category)
+        if t.endswith('ies') and len(t) > 4:
+            result.add(t[:-3] + 'y')
+        # Handle -es plurals (e.g. addresses->address)
+        if t.endswith('es') and len(t) > 4 and not t.endswith('ies'):
+            result.add(t[:-2])
+    return result
+
+
 def _schema_tokens() -> set:
     info = get_table_info()
     tokens = set()
@@ -656,16 +816,32 @@ def _schema_tokens() -> set:
     return tokens
 
 
+def _looks_like_followup(question: str) -> bool:
+    """Check if a short question looks like a conversational follow-up (e.g. "and white?")."""
+    cleaned = question.strip().lower().rstrip('?!.')
+    if not cleaned:
+        return False
+    followup_starts = ('and ', 'or ', 'also ', 'what about ', 'how about ')
+    words = cleaned.split()
+    return any(cleaned.startswith(s) for s in followup_starts) and len(words) <= 6
+
+
 def check_relevance(question: str, history: list | None = None) -> dict:
     """Verify the input is relevant to the attached database."""
     q = (question or "").strip()
     if not q:
         return {"relevant": False, "reason": "Please enter a question."}
 
-    q_lower = q.lower()
+    q_lower = q.lower().strip().rstrip('!.,?')
+
+    # Greetings must always pass through to AI classification (never blocked here)
+    greeting_words = {'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'greetings', 'howdy'}
+    if q_lower in greeting_words:
+        return {"relevant": True, "reason": "Greeting"}
+
     irrelevant_keywords = [
         'weather', 'temperature', 'forecast', 'news', 'time', 'date', 'joke',
-        'movie', 'sport', 'sports', 'recipe', 'recipe', 'song', 'music video',
+        'sport', 'sports', 'recipe', 'recipe', 'song', 'music video',
         'how are you', 'bing', 'google', 'twitter', 'facebook', 'stock',
         'price of bitcoin', 'exchange rate', 'currency', 'election', 'politics',
     ]
@@ -675,10 +851,19 @@ def check_relevance(question: str, history: list | None = None) -> dict:
     schema_tokens = _schema_tokens()
     if schema_tokens and tokenize_text(q) & schema_tokens:
         return {"relevant": True, "reason": "Relevant"}
+    # Also check with plural/singular normalization so "films" matches "film"
+    if schema_tokens and _normalize_tokens_with_plurals(tokenize_text(q)) & schema_tokens:
+        return {"relevant": True, "reason": "Relevant"}
 
-    question_words = re.search(r'\b(what|who|where|when|how|show|find|list|count|give me|display)\b', q_lower)
+    question_words = re.search(r'\b(what|who|where|when|how|show|find|list|count|give me|display|top|highest|lowest|most|least|best|worst|cheapest|expensive|average|maximum|minimum|first|last)\b', q_lower)
     if question_words:
         return {"relevant": True, "reason": "Relevant"}
+
+    # If there is conversation history, allow short follow-up questions to pass through
+    # to AI classification and follow-up rewriting. This handles cases like "and white?"
+    # after a previous query about "company names with cheese in the name".
+    if history and _looks_like_followup(q):
+        return {"relevant": True, "reason": "Follow-up in conversation context"}
 
     return {"relevant": False, "reason": "Please ask a question about the attached database schema."}
 
@@ -704,16 +889,19 @@ def check_data_availability(question: str) -> dict:
 
 def rewrite_followup_question(question: str, history: list) -> str:
     """Rewrite simple follow-up questions using the previous question context."""
-    q = question.strip()
+    q = question.strip().rstrip('?!.')
     if not history:
         return q
 
     prev = history[-1].get("q", "")
+    prev_sql = history[-1].get("sql", "")
     prev_lower = prev.lower()
-    if not re.match(r"^(what about|how about|and|also)\b", q, re.I):
+
+    # If the question doesn't start with a follow-up indicator, return as-is
+    if not re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\b", q, re.I):
         return q
 
-    target_match = re.search(r"(?:what about|how about|and|also)\s+([a-z][a-z .'-]+)$", q, re.I)
+    target_match = re.search(r"(?:what about|how about|and|or|also)\s+([a-z][a-z .'-]+)$", q, re.I)
     if not target_match:
         return q
 
@@ -722,14 +910,14 @@ def rewrite_followup_question(question: str, history: list) -> str:
     if "people who live in" in prev_lower or "people live in" in prev_lower:
         return f"what are the people who live in {target}"
 
-    starts_with_match = re.search(r'^(?:what about|how about|and|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q, re.I)
-    contains_match = re.search(r'^(?:what about|how about|and|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q, re.I)
-    if starts_with_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower):
+    starts_with_match = re.search(r'^(?:what about|how about|and|or|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q, re.I)
+    contains_match = re.search(r'^(?:what about|how about|and|or|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q, re.I)
+    if starts_with_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
         return f"what are the people whose names start with {starts_with_match.group(1)}"
-    if contains_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower):
+    if contains_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
         return f"what are the people whose names contain {contains_match.group(1)}"
 
-    followup_match = re.match(r"^(?:what about|how about|and|also|now|next|continue|same)\s+(.+)$", q, re.I)
+    followup_match = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+(.+)$", q, re.I)
     if followup_match:
         specific = followup_match.group(1).strip()
         if specific:
@@ -740,8 +928,8 @@ def rewrite_followup_question(question: str, history: list) -> str:
             if "orders" in prev_lower:
                 return f"what are the orders in {specific}"
 
-    if re.match(r"^(?:what about|how about|and|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I):
-        specific = re.match(r"^(?:what about|how about|and|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I).group(1).strip()
+    if re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I):
+        specific = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I).group(1).strip()
         if "people" in prev_lower or "customers" in prev_lower or "employees" in prev_lower or "employee" in prev_lower:
             return f"what are the people in {specific}"
         if "products" in prev_lower:
@@ -753,6 +941,44 @@ def rewrite_followup_question(question: str, history: list) -> str:
         return f"what are the customers in {target}"
     if "products" in prev_lower and "in" in prev_lower:
         return f"what are the products in {target}"
+
+    # ── Smart follow-up via SQL pattern analysis ────────────────────────
+    # For follow-ups like "and white?" when previous SQL used
+    # "LIKE '%cheese%'" on CompanyName, build a new question that
+    # replaces the old search term with the new one.
+    if prev_sql and target:
+        # Extract LIKE patterns from the previous SQL
+        like_pattern = re.search(
+            r"LIKE\s+'%([^']+)%'", prev_sql, re.I
+        )
+        if like_pattern:
+            # Extract the column name used in the LIKE condition
+            like_col_match = re.search(
+                r"(\w+)\s+LIKE\s+'%[^']+%'", prev_sql, re.I
+            )
+            col_name = like_col_match.group(1) if like_col_match else "value"
+
+            # Determine what kind of thing was being searched from the previous question
+            if "customer" in prev_lower or "people" in prev_lower or "employee" in prev_lower:
+                return f"what are the people with {target} in the name"
+            elif "product" in prev_lower:
+                return f"what are the products with {target} in the name"
+            elif "company" in prev_lower or "companies" in prev_lower or "supplier" in prev_lower or "shipper" in prev_lower:
+                return f"show me the companies with {target} in the name"
+            elif "order" in prev_lower:
+                return f"show me the orders with {target} in the name"
+            elif "category" in prev_lower:
+                return f"show me the categories with {target} in the name"
+            else:
+                # Generic fallback: reconstruct based on column name
+                return f"find all where {col_name} contains {target}"
+
+        # Extract equality patterns from previous SQL: Column = 'Value'
+        eq_pattern = re.search(
+            r"=\s+'([^']+)'", prev_sql, re.I
+        )
+        if eq_pattern:
+            return q  # Can't reliably substitute arbitrary equality values
 
     return q
 
@@ -774,9 +1000,28 @@ def _build_sql_prompt(question: str) -> str:
         for h in _conversation_history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
+    # Annotate schema columns with semantic hints for small models
+    hint_lines = []
+    table_info = get_table_info()
+    job_titles = {"contacttitle", "title"}
+    person_names = {"contactname", "firstname", "lastname"}
+    skip_cols_for_product_search = {"contacttitle", "contactname", "firstname", "lastname"}
+    for t, cols in table_info.items():
+        for c in cols:
+            ckey = c["name"].lower().replace(" ", "").replace("_", "")
+            if ckey in job_titles:
+                hint_lines.append(f"HINT: {t}.{c['name']} is a person's job title, not a product or category name.")
+            elif ckey in person_names:
+                hint_lines.append(f"HINT: {t}.{c['name']} is a person's name, not a product or category name.")
+
+    hint_section = "\n".join(hint_lines)
+    if hint_section:
+        hint_section = "\n" + hint_section + "\n"
+
     return (
         f"Attached SQLite DB schema (includes columns, types, sample data, foreign keys, and key column values):\n"
         f"{schema}\n"
+        f"{hint_section}"
         f"{history_lines}\n"
         f"New question: \"{question}\"\n\n"
         "Respond with one of:\n"
@@ -885,6 +1130,8 @@ def ask_ollama(question: str) -> dict:
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
+            "options": {"num_ctx": 8192, "seed": 0},
+            "max_tokens": 2048,
         })
         body = response.json()
         text = ""
@@ -897,8 +1144,14 @@ def ask_ollama(question: str) -> dict:
             print("ask_ollama: empty response — falling back")
             return {"action": "FALLBACK"}
         return _parse_ai_response_text(text)
+    except requests.exceptions.Timeout as e:
+        print(f"ask_ollama: request timed out — {e}")
+        return {"action": "FALLBACK"}
+    except requests.exceptions.ConnectionError as e:
+        print(f"ask_ollama: connection failed — {e}")
+        return {"action": "FALLBACK"}
     except Exception as e:
-        print(f"ask_ollama error: {e}")
+        print(f"ask_ollama: unexpected error ({type(e).__name__}): {e}")
         if gemini_client:
             print("Ollama unavailable, falling back to Gemini for SQL generation.")
             return ask_gemini(question)
@@ -949,18 +1202,21 @@ def ask_gemini_classification(question: str, history: list | None = None) -> dic
         return {"category": "db_query", "rewrite": question, "reason": "Gemini unavailable"}
 
     model = AI_GOOGLE_MODEL
+    schema_hint = _build_classification_schema_hint()
     history_lines = ""
     if history:
         history_lines = "\nHistory:\n"
         for h in history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
-    prompt = (
-        f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
-        f"{history_lines}\n"
-        f"User input: \"{question}\"\n"
-        "Reply with JSON only."
-    )
+    prompt_parts = [CLASSIFICATION_SYSTEM_PROMPT]
+    if schema_hint:
+        prompt_parts.append(schema_hint)
+    if history_lines:
+        prompt_parts.append(history_lines)
+    prompt_parts.append(f'User input: "{question}"')
+    prompt_parts.append("Reply with JSON only.")
+    prompt = "\n".join(prompt_parts)
 
     try:
         response = gemini_client.models.generate_content(
@@ -981,18 +1237,21 @@ def ask_openrouter_classification(question: str, history: list | None = None) ->
         return {"category": "db_query", "rewrite": question, "reason": "OpenRouter unavailable"}
 
     model = AI_OPENROUTER_MODEL
+    schema_hint = _build_classification_schema_hint()
     history_lines = ""
     if history:
         history_lines = "\nHistory:\n"
         for h in history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
-    prompt = (
-        f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
-        f"{history_lines}\n"
-        f"User input: \"{question}\"\n"
-        "Reply with JSON only."
-    )
+    prompt_parts = [CLASSIFICATION_SYSTEM_PROMPT]
+    if schema_hint:
+        prompt_parts.append(schema_hint)
+    if history_lines:
+        prompt_parts.append(history_lines)
+    prompt_parts.append(f'User input: "{question}"')
+    prompt_parts.append("Reply with JSON only.")
+    prompt = "\n".join(prompt_parts)
 
     try:
         response = _openrouter_request({
@@ -1026,20 +1285,29 @@ def ask_openrouter_classification(question: str, history: list | None = None) ->
 def ask_ollama_classification(question: str, history: list | None = None) -> dict:
     """Classify user intent using a locally running Ollama model."""
     model = AI_OLLAMA_MODEL
+    print(f"[DEBUG] ask_ollama_classification() called with question: {question!r}")
+    print(f"[DEBUG] Ollama base URL: {AI_OLLAMA_BASE_URL}, model: {model}")
+    schema_hint = _build_classification_schema_hint()
     history_lines = ""
     if history:
         history_lines = "\nHistory:\n"
         for h in history[-3:]:
             history_lines += f"Q: {h['q']}\nSQL: {h['sql']}\n"
 
-    prompt = (
-        f"{CLASSIFICATION_SYSTEM_PROMPT}\n"
-        f"{history_lines}\n"
-        f"User input: \"{question}\"\n"
-        "Reply with JSON only."
-    )
+    prompt_parts = [CLASSIFICATION_SYSTEM_PROMPT]
+    if schema_hint:
+        prompt_parts.append(schema_hint)
+    if history_lines:
+        prompt_parts.append(history_lines)
+    prompt_parts.append(f'User input: "{question}"')
+    prompt_parts.append("Reply with JSON only.")
+    prompt = "\n".join(prompt_parts)
+    print(f"[DEBUG] Classification prompt (first 200 chars): {prompt[:200]}")
+    print(f"[DEBUG] Does prompt contain 'User input:'? {'User input:' in prompt}")
+    print(f"[DEBUG] Does prompt contain question? {question in prompt}")
 
     try:
+        print(f"[DEBUG] About to send request to Ollama...")
         response = _ollama_request({
             "model": model,
             "messages": [
@@ -1047,7 +1315,9 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.0,
+            "options": {"seed": 0},
         })
+        print(f"[DEBUG] Ollama responded! Status: {response.status_code}")
         body = response.json()
         text = ""
         if isinstance(body, dict):
@@ -1055,18 +1325,30 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
             if choices:
                 msg = choices[0].get("message") or {}
                 text = (msg.get("content") or "").strip()
+        print(f"[DEBUG] Ollama classification response text: {text[:300]!r}")
         if not text:
+            print(f"[DEBUG] Empty response from Ollama - returning fallback")
             return {"category": "db_query", "rewrite": question, "reason": "empty response"}
-        return _parse_classification_response(text)
-    except Exception as e:
-        print(f"ask_ollama_classification error: {e}")
+        result = _parse_classification_response(text)
+        print(f"[DEBUG] Parsed classification result: {result}")
+        return result
+    except requests.exceptions.ConnectionError as e:
+        print(f"[DEBUG] Ollama CONNECTION ERROR: {e}")
+        print(f"[DEBUG] This means Ollama is NOT running at {AI_OLLAMA_BASE_URL}!")
         if gemini_client:
-            print("Ollama classification unavailable, falling back to Gemini classification.")
+            print("Ollama unavailable, falling back to Gemini.")
             return ask_gemini_classification(question, history)
-        return {"category": "db_query", "rewrite": question, "reason": "error"}
+        return {"category": "db_query", "rewrite": question, "reason": "error: Ollama not reachable"}
+    except Exception as e:
+        print(f"[DEBUG] ask_ollama_classification error ({type(e).__name__}): {e}")
+        if gemini_client:
+            print("Ollama classification unavailable, falling back to Gemini.")
+            return ask_gemini_classification(question, history)
+        return {"category": "db_query", "rewrite": question, "reason": f"error: {e}"}
 
 
 def ask_classification(question: str, history: list | None = None) -> dict:
+    print(f"[DEBUG] ask_classification() dispatching to provider: {AI_PROVIDER}")
     if AI_PROVIDER == "ollama":
         return ask_ollama_classification(question, history)
     if AI_PROVIDER == "openrouter":
@@ -1166,6 +1448,7 @@ def get_table_info(force_refresh: bool = False):
 TABLE_ALIASES = {
     "order": "Orders", "orders": "Orders", "purchase": "Orders", "purchases": "Orders",
     "customer": "Customers", "customers": "Customers", "client": "Customers", "clients": "Customers",
+    "company": "Customers", "companies": "Customers",
     "product": "Products", "products": "Products", "item": "Products", "items": "Products",
     "category": "Categories", "categories": "Categories",
     "supplier": "Suppliers", "suppliers": "Suppliers", "vendor": "Suppliers", "vendors": "Suppliers",
@@ -1175,6 +1458,17 @@ TABLE_ALIASES = {
     "territory": "Territories", "territories": "Territories",
     "order detail": "Order Details", "order details": "Order Details",
     "order_detail": "Order Details",
+    # Generic domain-agnostic aliases for non-Northwind schemas
+    "actor": "actor", "actors": "actor",
+    "film": "film", "films": "film", "movie": "film", "movies": "film",
+    "address": "address", "addresses": "address",
+    "city": "city", "cities": "city",
+    "country": "country", "countries": "country",
+    "rental": "rental", "rentals": "rental",
+    "payment": "payment", "payments": "payment",
+    "language": "language", "languages": "language",
+    "inventory": "inventory",
+    "store": "store", "stores": "store",
 }
 
 COLUMN_ALIASES = {
@@ -1226,10 +1520,17 @@ def detect_table(question):
             if alias in question.lower() and table in info:
                 return table
 
-    best_table = max(table_scores, key=table_scores.get)
-    if table_scores[best_table] == 0:
+    # Deterministic tie-breaking: if multiple tables have the same max score,
+    # pick the one that appears first alphabetically among the tied candidates.
+    if not table_scores:
+        return next(iter(info.keys())) if info else None
+    max_score = max(table_scores.values())
+    if max_score == 0:
         return next(iter(info.keys()))
-    return best_table
+    # Find all tables with the max score and pick alphabetically first
+    candidates = [t for t, s in table_scores.items() if s == max_score]
+    candidates.sort()
+    return candidates[0]
 
 
 def extract_number_conditions(question):
@@ -1264,21 +1565,29 @@ def extract_text_conditions(question, table):
     starts_with = re.search(r'(?:name|names)\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q_lower)
     contains = re.search(r'(?:name|names)\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q_lower)
     in_name = re.search(r'with\s+(?:a\s+)?([a-z])\s+(?:in|inside)\s+their\s+name\b', q_lower)
+    # Broader pattern for "with [word(s)] in the/their name" (handles multi-character values)
+    with_in_name = re.search(r'with\s+(?:a\s+)?([a-z][a-z\s]*?)\s+in\s+(?:the\s+)?(?:their\s+)?name\b', q_lower) if not (starts_with or contains or in_name) else None
 
-    if (starts_with or contains or in_name) and name_cols:
+    if (starts_with or contains or in_name or with_in_name) and name_cols:
         if starts_with:
             like_val = starts_with.group(1).upper() + '%'
         elif contains:
             like_val = '%' + contains.group(1).upper() + '%'
-        else:
+        elif in_name:
             like_val = '%' + in_name.group(1).upper() + '%'
+        else:
+            # with_in_name: value directly captured ("a " prefix is outside the group)
+            val = with_in_name.group(1).strip()
+            like_val = '%' + val.upper() + '%'
         conditions.append((f'"{table}"."{name_cols[0]}"', "LIKE", f"'{like_val}'"))
 
     # ── Geography column matching (city, country, etc.) ────────────────
     geo_col_names = {"city", "country", "state", "region", "province", "shipcity", "shipcountry"}
+    geo_found_on_anchor = False
     for col in info[table]:
         col_key = col["name"].lower().replace(" ", "").replace("_", "")
         if col_key in geo_col_names:
+            geo_found_on_anchor = True
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
@@ -1292,22 +1601,155 @@ def extract_text_conditions(question, table):
             except Exception:
                 conn.close()
 
+    # ── Multi-hop geography via FK graph ────────────────────────────────
+    # If the anchor table doesn't have geography columns, walk the FK chain
+    # to find geography tables (e.g. customer -> address -> city -> country).
+    # Build subquery-based conditions for each geography value found.
+    if not geo_found_on_anchor:
+        fks = get_foreign_keys()
+        # Build reverse FK map: {table: [(fk_column, referenced_table, ref_column), ...]}
+        fk_graph = {}  # table -> [(child_column, parent_table, parent_column), ...]
+        for fk in fks:
+            t = fk["table"]
+            if t not in fk_graph:
+                fk_graph[t] = []
+            fk_graph[t].append((fk["column"], fk["references_table"], fk["references_column"]))
+
+        # BFS from anchor table to find a geography table reachable via FK chain
+        visited = set()
+        queue = [(table, [])]  # (current_table, [(child_table, child_col, parent_table, parent_col), ...])
+        geo_path = None
+        geo_value = None
+        while queue and geo_path is None:
+            cur_table, path = queue.pop(0)
+            if cur_table in visited:
+                continue
+            visited.add(cur_table)
+            # Check if cur_table has direct geography columns
+            if cur_table in info:
+                for col in info[cur_table]:
+                    col_key = col["name"].lower().replace(" ", "").replace("_", "")
+                    if col_key in geo_col_names and cur_table != table:
+                        # Found a geography table! Check if any value matches
+                        conn2 = sqlite3.connect(DB_PATH)
+                        try:
+                            cursor2 = conn2.cursor()
+                            cursor2.execute(f'SELECT DISTINCT "{col["name"]}" FROM "{cur_table}" WHERE "{col["name"]}" IS NOT NULL ORDER BY 1')
+                            vals = [r[0] for r in cursor2.fetchall() if r[0]]
+                            conn2.close()
+                            for v in vals:
+                                if v and v.lower() in q_lower:
+                                    geo_path = path
+                                    geo_value = v
+                                    break
+                        except Exception:
+                            conn2.close()
+                        if geo_path:
+                            break
+            # Follow FK references from this table
+            if cur_table in fk_graph:
+                for child_col, parent_table, parent_col in fk_graph[cur_table]:
+                    if parent_table not in visited:
+                        new_path = path + [(cur_table, child_col, parent_table, parent_col)]
+                        queue.append((parent_table, new_path))
+
+        if geo_path and geo_value:
+            # Build the subquery from the FK path
+            # The path is [(from_table, from_col, to_table, to_col), ...]
+            # Build SELECT ... FROM chain
+            first_step = geo_path[0]
+            # Start from the anchor table
+            subquery_aliases = {}
+            joins = []
+            prev_alias = "T0"
+            prev_table = table
+            prev_col = first_step[1]  # The FK column on the anchor table
+            
+            for i, (from_tbl, from_col, to_tbl, to_col) in enumerate(geo_path):
+                alias = f"T{i+1}"
+                joins.append(f'JOIN "{to_tbl}" AS {alias} ON {prev_alias}."{from_col}" = {alias}."{to_col}"')
+                prev_alias = alias
+                prev_table = to_tbl
+                prev_col = to_col
+
+            # The last table in the path has the geography column
+            last_alias = f"T{len(geo_path)}"
+            # Find which geography column matched
+            for col in info[prev_table]:
+                col_key = col["name"].lower().replace(" ", "").replace("_", "")
+                if col_key in geo_col_names:
+                    # Find the anchor table's primary key (or first column as fallback)
+                    pk_col = None
+                    for c in info[table]:
+                        ck = c["name"].lower().replace(" ", "").replace("_", "")
+                        if ck == table.lower() + "id" or ck == "id":
+                            pk_col = c["name"]
+                            break
+                    if not pk_col:
+                        pk_col = info[table][0]["name"]
+                    # Build subquery returning anchor table PKs that match
+                    subquery_sql = (
+                        f'SELECT T0."{pk_col}" FROM "{table}" AS T0 {" ".join(joins)} '
+                        f'WHERE {last_alias}."{col["name"]}" = {quote_sql_value(geo_value)}'
+                    )
+                    conditions.append((
+                        f'"{table}"."{pk_col}"',
+                        "IN",
+                        f'({subquery_sql})'
+                    ))
+                    break
+
     # ── Named value matching (only if question mentions a likely value) ─
     if name_cols and any(w in q_lower for w in ["show", "find", "list", "get", "named", "called"]):
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        try:
-            cursor.execute(f'SELECT DISTINCT "{name_cols[0]}" FROM "{table}" WHERE "{name_cols[0]}" IS NOT NULL')
-            values = [r[0] for r in cursor.fetchall() if r[0]]
-            conn.close()
-            for val in values:
-                if val and val.lower() in q_lower:
-                    conditions.append((f'"{table}"."{name_cols[0]}"', "=", quote_sql_value(val)))
-                    break
-        except Exception:
-            conn.close()
+        # Skip if we already have a LIKE condition for this column (avoid redundant filters)
+        has_like = any(c[1] == "LIKE" for c in conditions)
+        if not has_like:
+            # Try to extract a meaningful value word from the question
+            value_match = re.search(r'(?:about|of|for|with)\s+([a-z][a-z\s]+?)(?:\s+in\s+the\s+name)?$', q_lower)
+            if not value_match:
+                value_match = re.search(r'\b(named|called)\s+([a-z][a-z\s]+?)$', q_lower)
+            if value_match:
+                raw_value = value_match.group(1) if value_match.lastindex == 1 else value_match.group(2)
+                # Use the new cross-column search helper
+                found_col = search_value_across_text_columns(raw_value.strip(), table, info)
+                if found_col:
+                    conditions.append((f'"{table}"."{found_col}"', "LIKE", quote_sql_value(f'%{raw_value.strip()}%')))
 
     return conditions
+
+
+def search_value_across_text_columns(value: str, table: str, info: dict) -> str | None:
+    """Search for a value across ALL text columns in a table.
+    Returns the column name where a case-insensitive DISTINCT match is found,
+    or None if no column contains the value.
+    Works like the geography matching already in extract_text_conditions().
+    """
+    if not value or not table or table not in info:
+        return None
+    val_lower = value.lower().strip()
+    if len(val_lower) < 2:
+        return None
+    text_cols = [
+        c["name"] for c in info[table]
+        if c["type"] and any(t in c["type"].upper() for t in ("CHAR", "CLOB", "TEXT", "VARCHAR"))
+    ]
+    if not text_cols:
+        text_cols = [c["name"] for c in info[table]]
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        for col in text_cols:
+            cursor.execute(f'SELECT DISTINCT "{col}" FROM "{table}" WHERE "{col}" IS NOT NULL ORDER BY 1')
+            distinct_vals = [str(r[0]).lower().strip() for r in cursor.fetchall() if r[0]]
+            for dv in distinct_vals:
+                if val_lower == dv or val_lower in dv:
+                    conn.close()
+                    return col
+        conn.close()
+        return None
+    except Exception:
+        conn.close()
+        return None
 
 
 def extract_date_conditions(question):
@@ -1607,16 +2049,10 @@ def build_general_select_sql(question, table, extra_columns):
                     value = match.group(1).strip()
                     where_clauses.append(f'"{table}"."{col_name}" = ' + quote_sql_value(value))
 
-    # Add pattern matching conditions only for explicit value phrases
-    explicit_match = re.search(r'\b(?:named|called|make|makes|from|in|about|of)\s+([a-z0-9 &"\'\-]+)', q_lower)
-    if explicit_match:
-        value = explicit_match.group(1).strip()
-        if value and not re.match(r'^(what|who|show|list|find|give|give me)\b', value):
-            preferred_cols = get_preferred_text_columns(table, info)
-            if preferred_cols:
-                col_name = preferred_cols[0]
-                where_clauses.append(f'"{table}"."{col_name}" LIKE ' + quote_sql_value(f'%{value}%'))
-
+    # Smart value matching: search across actual DB values before guessing a column
+    # Also check extract_text_conditions results first — if they already have a LIKE
+    # condition for this value, skip the explicit_match logic to avoid duplicates.
+    already_has_like_on_value = False
     extra_conditions = extract_text_conditions(question, table)
     for col, op, val in extra_conditions:
         if '.' in col:
@@ -1625,6 +2061,46 @@ def build_general_select_sql(question, table, extra_columns):
             clause = f'"{table}"."{col}" {op} {val}'
         if clause not in where_clauses:
             where_clauses.append(clause)
+            if op == "LIKE":
+                already_has_like_on_value = True
+
+    if not already_has_like_on_value:
+        # Build explicit_match patterns — prefer longer matches first to avoid
+        # matching on short stop-words inside the value.
+        explicit_match = re.search(
+            r'\b(?:named|called)\s+([a-z][a-z0-9 &\'\-]{2,})', q_lower
+        )
+        if not explicit_match:
+            explicit_match = re.search(
+                r'\b(?:about|of|for|with)\s+([a-z][a-z0-9 &\'\-]{2,})$', q_lower
+            )
+        if not explicit_match:
+            # Fallback: broad match but require min 3-char value
+            explicit_match = re.search(
+                r'\b(?:show|find|list|get)\s+(?:me\s+)?(?:all\s+)?(?:the\s+)?(?:actors?|customers?|employees?|products?|films?|movies?|orders?|address(?:es)?|cities?|countries?|staff|users?)\s+(?:named|called|from|in|about|of|with)\s+([a-z][a-z0-9 &\'\-]{2,})',
+                q_lower
+            )
+        if explicit_match:
+            value = explicit_match.group(1).strip()
+            # Trim trailing conjunctive phrases like "in the name", "in the company", etc.
+            value = re.sub(r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*$', '', value).strip()
+            if value and not re.match(r'^(what|who|show|list|find|give|give me|the|all|me)\b', value):
+                # First try to find which column actually contains this value
+                found_col = search_value_across_text_columns(value, table, info)
+                if found_col:
+                    where_clauses.append(f'"{table}"."{found_col}" LIKE ' + quote_sql_value(f'%{value}%'))
+                else:
+                    # No column matched; check if the value exists in a related table
+                    for other_table in info:
+                        if other_table == table:
+                            continue
+                        other_col = search_value_across_text_columns(value, other_table, info)
+                        if other_col:
+                            where_clauses.append(f'"{other_table}"."{other_col}" LIKE ' + quote_sql_value(f'%{value}%'))
+                            break
+                    else:
+                        # Really no match found — return a no-match response indicator
+                        return f"NO_MATCH: no column found containing '{value}' — try a different value"
 
     if where_clauses:
         sql += ' WHERE ' + ' AND '.join(sorted(set(where_clauses)))
@@ -1670,9 +2146,59 @@ def generate_sql(question):
         return 'SELECT 1'
 
 
+def is_safe_select(sql: str) -> bool:
+    """Validate that a SQL statement is a safe read-only SELECT (or WITH ... SELECT).
+
+    - Strips comments (-- and /* */) and surrounding whitespace.
+    - Confirms the statement starts with SELECT or WITH.
+    - Rejects destructive/DDL keywords as whole words (case-insensitive).
+    - Rejects multiple statements (semicolons before end of input).
+    """
+    if not sql or not sql.strip():
+        return False
+
+    text = sql.strip()
+
+    # Remove single-line comments (-- ...)
+    text = re.sub(r'--.*?(\n|$)', '\n', text)
+    # Remove block comments (/* ... */)
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    text = text.strip()
+
+    if not text:
+        return False
+
+    # Reject if a semicolon appears before the end, allowing one optional trailing semicolon
+    semi_count = text.count(';')
+    if semi_count > 1:
+        return False
+    if semi_count == 1 and not text.rstrip().endswith(';'):
+        return False
+
+    text_upper = text.upper().lstrip()
+
+    # Must start with SELECT or WITH
+    if not (text_upper.startswith('SELECT') or text_upper.startswith('WITH')):
+        return False
+
+    # Reject destructive / DDL keywords as whole words
+    forbidden = {
+        'DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE',
+        'TRUNCATE', 'ATTACH', 'DETACH', 'PRAGMA', 'VACUUM', 'REPLACE',
+        'GRANT', 'REVOKE',
+    }
+    # Break into words and check each one
+    words = re.findall(r'[A-Za-z_][A-Za-z0-9_]*', text_upper)
+    for w in words:
+        if w in forbidden:
+            return False
+
+    return True
+
+
 def execute_sql(sql):
-    """Execute SQL query against the database and return results."""
-    conn = sqlite3.connect(DB_PATH)
+    """Execute a read-only SQL query against the database and return results."""
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
@@ -1769,11 +2295,13 @@ def query():
         return jsonify({"error": "Missing 'question' in request body"}), 400
 
     question = data["question"].strip()
+    print(f"[DEBUG] query() called with question: {question!r}")
     if not question:
         return jsonify({"error": "Question cannot be empty"}), 400
 
     # Stage 1: relevance check
     relevance = check_relevance(question, _conversation_history)
+    print(f"[DEBUG] Stage 1 - check_relevance result: {relevance}")
     if not relevance["relevant"]:
         return jsonify({
             "is_relevant": False,
@@ -1783,9 +2311,20 @@ def query():
             "columns": [],
         })
 
+    print(f"[STAGE_LOG] query() stage=1 (relevance_check) provider={AI_PROVIDER} question={question!r} result=passed")
     # Stage 2: classify the intent and handle non-query inputs.
     classification = ask_classification(question, _conversation_history)
+    print(f"[STAGE_LOG] query() stage=2 (classification) provider={AI_PROVIDER} category={classification.get('category', 'unknown')} question={question!r}")
     category = classification.get("category", "db_query")
+
+    # If the AI says irrelevant but the question looks like a short follow-up with
+    # conversation history, override to db_query so the local rewrite and SQL
+    # generation can handle it. This handles cases like "and white?" after a
+    # previous query about "companies with cheese in the name".
+    if category == "irrelevant" and _conversation_history and _looks_like_followup(question):
+        category = "db_query"
+        classification["category"] = "db_query"
+
     if category == "irrelevant":
         return jsonify({
             "is_relevant": False,
@@ -1816,8 +2355,11 @@ def query():
         question = classification["rewrite"].strip()
     else:
         question = rewrite_followup_question(question, _conversation_history)
+    print(f"[STAGE_LOG] query() stage=3 (followup_rewrite) question={question!r}")
     availability = check_data_availability(question)
     if not availability["available"]:
+        print(f"[STAGE_LOG] query() stage=3b (data_availability) result=denied")
+        
         return jsonify({
             "is_relevant": False,
             "reason": availability["reason"],
@@ -1828,6 +2370,7 @@ def query():
 
     # Use configured AI provider and fall back to rule-based SQL generation when needed.
     result = ask_ai(question)
+    print(f"[STAGE_LOG] query() stage=4 (ai_sql_generation) action={result['action']} provider={AI_PROVIDER}")
     if result["action"] == "DENY":
         return jsonify({
             "is_relevant": False,
@@ -1837,23 +2380,69 @@ def query():
             "columns": [],
         })
 
-    sql = result.get("sql") if result["action"] == "SQL" else None
+    from_ai = result["action"] == "SQL"
+    sql = result.get("sql") if from_ai else None
+    source = (
+        "ollama" if AI_PROVIDER == "ollama" and from_ai else
+        "openrouter" if AI_PROVIDER == "openrouter" and from_ai else
+        "gemini" if AI_PROVIDER == "google" and from_ai else
+        "fallback_rules"
+    )
     if not sql:
         sql = generate_sql(question)
+        source = "fallback_rules"
+        print(f"[STAGE_LOG] query() stage=5 (fallback_sql_generation) sql={sql[:80]!r}")
+
+    # Handle no-match response from the fallback engine before safety validation
+    if sql and sql.startswith("NO_MATCH:"):
+        return jsonify({
+            "is_relevant": False,
+            "reason": sql,
+            "sql": sql,
+            "results": [],
+            "columns": [],
+        })
+
+    # Safety validation: reject unsafe SQL before execution
+    if not is_safe_select(sql):
+        return jsonify({
+            "is_relevant": False,
+            "reason": "The generated query was rejected by the safety validator. Only SELECT / WITH statements are allowed.",
+            "sql": sql,
+            "results": [],
+            "columns": [],
+        })
 
     try:
+        print(f"[STAGE_LOG] query() stage=6 (execute_sql) sql={sql[:100]!r}")
         columns, results = execute_sql(sql)
+
+        # Check for revenue/sum/aggregate queries returning empty results (e.g. date filters with no matching data)
+        if not results and ('SUM(' in sql.upper() or 'COUNT(' in sql.upper()) and any(term in sql.upper() for term in ('WHERE', 'BETWEEN', 'YEAR(')):
+            print(f"[STAGE_LOG] query() stage=6b (empty_aggregate_detected)")
+            return jsonify({
+                "is_relevant": True,
+                "sql": sql,
+                "source": source,
+                "columns": columns,
+                "results": [],
+                "message": "No data found for the specified period. (The query itself is correct - there are simply no matching rows.)"
+            })
+
         # Save to history for follow-up questions
         _conversation_history.append({"q": question, "sql": sql})
         if len(_conversation_history) > MAX_HISTORY:
             _conversation_history.pop(0)
+        print(f"[STAGE_LOG] query() stage=6 (execute_sql_complete) rows={len(results)}")
         return jsonify({
             "is_relevant": True,
             "sql": sql,
-            "results": results,
+            "source": source,
             "columns": columns,
+            "results": results,
         })
     except Exception as e:
+        print(f"[STAGE_LOG] query() stage=6 (execute_sql_error) error={e!r}")
         return jsonify({
             "error": str(e),
             "is_relevant": True,
@@ -1869,10 +2458,18 @@ def schema():
     return jsonify(info)
 
 
+@app.route("/history", methods=["GET"])
+def history():
+    """Return the conversation history for the UI sidebar."""
+    return jsonify(_conversation_history)
+
+
 if __name__ == "__main__":
     # Initialize schema cache
     get_table_info()
     PORT = int(os.environ.get("PORT", "5005"))
+    # SECURITY: HOST=0.0.0.0 listens on all interfaces.
+    # Override to 127.0.0.1 in production / non-containerized deployments.
     HOST = os.environ.get("HOST", "0.0.0.0")
-    DEBUG = os.environ.get("FLASK_DEBUG", "1") == "1"
+    DEBUG = os.environ.get("FLASK_DEBUG", "0") == "1"
     app.run(debug=DEBUG, host=HOST, port=PORT)
