@@ -340,14 +340,18 @@ CLASSIFICATION_SYSTEM_PROMPT = (
     "also rewrite it into a full standalone database question using the history. "
     "Return exactly one JSON object with keys: category, rewrite, reason. "
     "Do not include extra text.\n"
-    "--- Synonym hints (use these to match everyday language to table names) ---\n"
-    "users/people/clients ≈ Customers or Employees\n"
-    "items/products/goods ≈ Products\n"
-    "orders/purchases/transactions ≈ Orders\n"
-    "categories/groups/types ≈ Categories\n"
-    "suppliers/vendors/providers ≈ Suppliers\n"
-    "companies/businesses/orgs ≈ Customers or Suppliers\n"
-    "A question mentioning these synonyms IS a valid db_query — do NOT mark it irrelevant."
+    "--- Generic synonym hints ---\n"
+    "Think about everyday synonyms for whatever table names are listed below.\n"
+    "For example: people/individuals/clients ≈ any table representing persons\n"
+    "(employees, customers, actors, staff, users, etc.)\n"
+    "items/goods/products ≈ any product/inventory-like table\n"
+    "transactions/purchases/orders ≈ any order/rental/payment-like table\n"
+    "places/locations/addresses ≈ any geography table\n"
+    "movies/films/titles ≈ any media/content table\n"
+    "groups/types/categories ≈ any classification table\n"
+    "The '--- Available tables' section below lists EVERY valid query target. "
+    "If the user mentions a table name listed there, or an everyday synonym "
+    "for one of those tables, it IS a valid db_query — do NOT mark it irrelevant."
 )
 
 
@@ -377,7 +381,7 @@ def _build_classification_schema_hint() -> str:
             fk_map[t] = []
         fk_map[t].append(f"→ {fk['references_table']}")
 
-    lines = ["--- Available tables ---"]
+    lines = ["--- Available tables (ALL of these are valid query targets) ---"]
     for table in sorted(info.keys()):
         cols = info[table]
         col_count = len(cols)
@@ -392,12 +396,17 @@ def _build_classification_schema_hint() -> str:
             ctype = (c["type"] or "").upper()
             cname_lower = cname.lower().replace(" ", "").replace("_", "")
 
+            # Never skip purely on name — also keep columns whose name is the
+            # same as the table (e.g. table "city" with column "city") so the
+            # model sees the connection.
+            is_table_name_column = (cname_lower == table.lower().replace(" ", "").replace("_", ""))
+
             # Skip pure ID columns (CustomerID, ProductID, etc.)
-            if cname_lower.endswith("id") and len(cname) <= 20:
+            if cname_lower.endswith("id") and len(cname) <= 20 and not is_table_name_column:
                 continue
             # Skip numeric/boolean columns by type — generic, works for any DB
             if ctype and any(t in ctype for t in ("INT", "REAL", "FLOAT", "NUMERIC", "DECIMAL", "BOOLEAN", "BIT")):
-                if not any(t in ctype for t in ("CHAR", "CLOB", "TEXT", "VARCHAR")):
+                if not any(t in ctype for t in ("CHAR", "CLOB", "TEXT", "VARCHAR")) and not is_table_name_column:
                     continue
 
             is_text = any(t in ctype for t in ("CHAR", "CLOB", "TEXT", "VARCHAR"))
@@ -422,6 +431,9 @@ def _build_classification_schema_hint() -> str:
                     desc_like.append(cname)
                 else:
                     desc_like.append(cname)
+            elif is_table_name_column:
+                # Keep column even if non-text when it matches the table name
+                name_like.append(cname)
 
         # Build the column display string (max 3 columns total)
         display_cols = (name_like + desc_like)[:3]
@@ -448,7 +460,9 @@ def _build_classification_schema_hint() -> str:
 
         lines.append(table_line)
 
-    return "\n".join(lines)
+    hint = "\n".join(lines)
+    print(f"[DEBUG] _build_classification_schema_hint() output:\n{hint}")
+    return hint
 
 # SYSTEM PROMPT: generate SQL or deny if the question is unrelated or the data is not available.
 SQL_SYSTEM_PROMPT = (
@@ -1409,6 +1423,17 @@ TABLE_ALIASES = {
     "territory": "Territories", "territories": "Territories",
     "order detail": "Order Details", "order details": "Order Details",
     "order_detail": "Order Details",
+    # Generic domain-agnostic aliases for non-Northwind schemas
+    "actor": "actor", "actors": "actor",
+    "film": "film", "films": "film", "movie": "film", "movies": "film",
+    "address": "address", "addresses": "address",
+    "city": "city", "cities": "city",
+    "country": "country", "countries": "country",
+    "rental": "rental", "rentals": "rental",
+    "payment": "payment", "payments": "payment",
+    "language": "language", "languages": "language",
+    "inventory": "inventory",
+    "store": "store", "stores": "store",
 }
 
 COLUMN_ALIASES = {
@@ -1460,10 +1485,17 @@ def detect_table(question):
             if alias in question.lower() and table in info:
                 return table
 
-    best_table = max(table_scores, key=table_scores.get)
-    if table_scores[best_table] == 0:
+    # Deterministic tie-breaking: if multiple tables have the same max score,
+    # pick the one that appears first alphabetically among the tied candidates.
+    if not table_scores:
+        return next(iter(info.keys())) if info else None
+    max_score = max(table_scores.values())
+    if max_score == 0:
         return next(iter(info.keys()))
-    return best_table
+    # Find all tables with the max score and pick alphabetically first
+    candidates = [t for t, s in table_scores.items() if s == max_score]
+    candidates.sort()
+    return candidates[0]
 
 
 def extract_number_conditions(question):
@@ -1516,9 +1548,11 @@ def extract_text_conditions(question, table):
 
     # ── Geography column matching (city, country, etc.) ────────────────
     geo_col_names = {"city", "country", "state", "region", "province", "shipcity", "shipcountry"}
+    geo_found_on_anchor = False
     for col in info[table]:
         col_key = col["name"].lower().replace(" ", "").replace("_", "")
         if col_key in geo_col_names:
+            geo_found_on_anchor = True
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
@@ -1531,6 +1565,104 @@ def extract_text_conditions(question, table):
                         break
             except Exception:
                 conn.close()
+
+    # ── Multi-hop geography via FK graph ────────────────────────────────
+    # If the anchor table doesn't have geography columns, walk the FK chain
+    # to find geography tables (e.g. customer -> address -> city -> country).
+    # Build subquery-based conditions for each geography value found.
+    if not geo_found_on_anchor:
+        fks = get_foreign_keys()
+        # Build reverse FK map: {table: [(fk_column, referenced_table, ref_column), ...]}
+        fk_graph = {}  # table -> [(child_column, parent_table, parent_column), ...]
+        for fk in fks:
+            t = fk["table"]
+            if t not in fk_graph:
+                fk_graph[t] = []
+            fk_graph[t].append((fk["column"], fk["references_table"], fk["references_column"]))
+
+        # BFS from anchor table to find a geography table reachable via FK chain
+        visited = set()
+        queue = [(table, [])]  # (current_table, [(child_table, child_col, parent_table, parent_col), ...])
+        geo_path = None
+        geo_value = None
+        while queue and geo_path is None:
+            cur_table, path = queue.pop(0)
+            if cur_table in visited:
+                continue
+            visited.add(cur_table)
+            # Check if cur_table has direct geography columns
+            if cur_table in info:
+                for col in info[cur_table]:
+                    col_key = col["name"].lower().replace(" ", "").replace("_", "")
+                    if col_key in geo_col_names and cur_table != table:
+                        # Found a geography table! Check if any value matches
+                        conn2 = sqlite3.connect(DB_PATH)
+                        try:
+                            cursor2 = conn2.cursor()
+                            cursor2.execute(f'SELECT DISTINCT "{col["name"]}" FROM "{cur_table}" WHERE "{col["name"]}" IS NOT NULL ORDER BY 1')
+                            vals = [r[0] for r in cursor2.fetchall() if r[0]]
+                            conn2.close()
+                            for v in vals:
+                                if v and v.lower() in q_lower:
+                                    geo_path = path
+                                    geo_value = v
+                                    break
+                        except Exception:
+                            conn2.close()
+                        if geo_path:
+                            break
+            # Follow FK references from this table
+            if cur_table in fk_graph:
+                for child_col, parent_table, parent_col in fk_graph[cur_table]:
+                    if parent_table not in visited:
+                        new_path = path + [(cur_table, child_col, parent_table, parent_col)]
+                        queue.append((parent_table, new_path))
+
+        if geo_path and geo_value:
+            # Build the subquery from the FK path
+            # The path is [(from_table, from_col, to_table, to_col), ...]
+            # Build SELECT ... FROM chain
+            first_step = geo_path[0]
+            # Start from the anchor table
+            subquery_aliases = {}
+            joins = []
+            prev_alias = "T0"
+            prev_table = table
+            prev_col = first_step[1]  # The FK column on the anchor table
+            
+            for i, (from_tbl, from_col, to_tbl, to_col) in enumerate(geo_path):
+                alias = f"T{i+1}"
+                joins.append(f'JOIN "{to_tbl}" AS {alias} ON {prev_alias}."{from_col}" = {alias}."{to_col}"')
+                prev_alias = alias
+                prev_table = to_tbl
+                prev_col = to_col
+
+            # The last table in the path has the geography column
+            last_alias = f"T{len(geo_path)}"
+            # Find which geography column matched
+            for col in info[prev_table]:
+                col_key = col["name"].lower().replace(" ", "").replace("_", "")
+                if col_key in geo_col_names:
+                    # Find the anchor table's primary key (or first column as fallback)
+                    pk_col = None
+                    for c in info[table]:
+                        ck = c["name"].lower().replace(" ", "").replace("_", "")
+                        if ck == table.lower() + "id" or ck == "id":
+                            pk_col = c["name"]
+                            break
+                    if not pk_col:
+                        pk_col = info[table][0]["name"]
+                    # Build subquery returning anchor table PKs that match
+                    subquery_sql = (
+                        f'SELECT T0."{pk_col}" FROM "{table}" AS T0 {" ".join(joins)} '
+                        f'WHERE {last_alias}."{col["name"]}" = {quote_sql_value(geo_value)}'
+                    )
+                    conditions.append((
+                        f'"{table}"."{pk_col}"',
+                        "IN",
+                        f'({subquery_sql})'
+                    ))
+                    break
 
     # ── Named value matching (only if question mentions a likely value) ─
     if name_cols and any(w in q_lower for w in ["show", "find", "list", "get", "named", "called"]):
@@ -1883,32 +2015,9 @@ def build_general_select_sql(question, table, extra_columns):
                     where_clauses.append(f'"{table}"."{col_name}" = ' + quote_sql_value(value))
 
     # Smart value matching: search across actual DB values before guessing a column
-    explicit_match = re.search(r'\b(?:named|called|make|makes|from|in|about|of|with)\s+([a-z0-9 &"\'\-]+)', q_lower)
-    if explicit_match:
-        value = explicit_match.group(1).strip()
-        # Trim trailing conjunctive phrases like "in the name", "in the company", etc.
-        # so that "white in the name" becomes "white" before column-value matching.
-        value = re.sub(r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*$', '', value).strip()
-        if value and not re.match(r'^(what|who|show|list|find|give|give me|the)\b', value):
-            # First try to find which column actually contains this value
-            found_col = search_value_across_text_columns(value, table, info)
-            if found_col:
-                where_clauses.append(f'"{table}"."{found_col}" LIKE ' + quote_sql_value(f'%{value}%'))
-            else:
-                # No column matched; check if the value is a generic term like "cheese"
-                # that might exist in a related table we haven't joined
-                for other_table in info:
-                    if other_table == table:
-                        continue
-                    other_col = search_value_across_text_columns(value, other_table, info)
-                    if other_col:
-                        # Found it in another table — try to build a JOIN
-                        where_clauses.append(f'"{other_table}"."{other_col}" LIKE ' + quote_sql_value(f'%{value}%'))
-                        break
-                else:
-                    # Really no match found — return a no-match response indicator
-                    return f"NO_MATCH: no column found containing '{value}' — try a different value"
-
+    # Also check extract_text_conditions results first — if they already have a LIKE
+    # condition for this value, skip the explicit_match logic to avoid duplicates.
+    already_has_like_on_value = False
     extra_conditions = extract_text_conditions(question, table)
     for col, op, val in extra_conditions:
         if '.' in col:
@@ -1917,6 +2026,46 @@ def build_general_select_sql(question, table, extra_columns):
             clause = f'"{table}"."{col}" {op} {val}'
         if clause not in where_clauses:
             where_clauses.append(clause)
+            if op == "LIKE":
+                already_has_like_on_value = True
+
+    if not already_has_like_on_value:
+        # Build explicit_match patterns — prefer longer matches first to avoid
+        # matching on short stop-words inside the value.
+        explicit_match = re.search(
+            r'\b(?:named|called)\s+([a-z][a-z0-9 &\'\-]{2,})', q_lower
+        )
+        if not explicit_match:
+            explicit_match = re.search(
+                r'\b(?:about|of|for|with)\s+([a-z][a-z0-9 &\'\-]{2,})$', q_lower
+            )
+        if not explicit_match:
+            # Fallback: broad match but require min 3-char value
+            explicit_match = re.search(
+                r'\b(?:show|find|list|get)\s+(?:me\s+)?(?:all\s+)?(?:the\s+)?(?:actors?|customers?|employees?|products?|films?|movies?|orders?|address(?:es)?|cities?|countries?|staff|users?)\s+(?:named|called|from|in|about|of|with)\s+([a-z][a-z0-9 &\'\-]{2,})',
+                q_lower
+            )
+        if explicit_match:
+            value = explicit_match.group(1).strip()
+            # Trim trailing conjunctive phrases like "in the name", "in the company", etc.
+            value = re.sub(r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*$', '', value).strip()
+            if value and not re.match(r'^(what|who|show|list|find|give|give me|the|all|me)\b', value):
+                # First try to find which column actually contains this value
+                found_col = search_value_across_text_columns(value, table, info)
+                if found_col:
+                    where_clauses.append(f'"{table}"."{found_col}" LIKE ' + quote_sql_value(f'%{value}%'))
+                else:
+                    # No column matched; check if the value exists in a related table
+                    for other_table in info:
+                        if other_table == table:
+                            continue
+                        other_col = search_value_across_text_columns(value, other_table, info)
+                        if other_col:
+                            where_clauses.append(f'"{other_table}"."{other_col}" LIKE ' + quote_sql_value(f'%{value}%'))
+                            break
+                    else:
+                        # Really no match found — return a no-match response indicator
+                        return f"NO_MATCH: no column found containing '{value}' — try a different value"
 
     if where_clauses:
         sql += ' WHERE ' + ' AND '.join(sorted(set(where_clauses)))
