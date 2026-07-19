@@ -64,14 +64,26 @@ AskYourDB is a web application that converts natural language questions into SQL
 │             / ask_ollama                    │
 │ • Generates SQL: or DENY: response          │
 │ • Falls back to rule‑based generate_sql()   │
-│   if AI unavailable                         │
+│   if AI unavailable — response is tagged    │
+│   with its source (ai / fallback_rules) so  │
+│   the UI can surface when a fallback ran    │
 └─────────────────────────────────────────────┘
        │
        ▼
 ┌─────────────────────────────────────────────┐
-│ STAGE 5: Execute SQL                        │
+│ STAGE 5: Safety Validation                  │
+│ is_safe_select()                            │
+│ • Rejects DROP/DELETE/UPDATE/INSERT/ALTER/  │
+│   PRAGMA/ATTACH/etc. before execution       │
+│ • Rejects multi-statement queries           │
+└─────────────────────────────────────────────┘
+       │
+       ▼
+┌─────────────────────────────────────────────┐
+│ STAGE 6: Execute SQL                        │
 │ execute_sql()                               │
-│ • Runs the generated SELECT query           │
+│ • Runs the query against a read-only        │
+│   SQLite connection (mode=ro)               │
 │ • Returns columns + rows as JSON            │
 └─────────────────────────────────────────────┘
        │
@@ -86,11 +98,15 @@ AskYourDB is a web application that converts natural language questions into SQL
 - **Natural Language Queries** — Ask questions like *"Show me all customers from Germany"* or *"What are the top 5 most expensive products?"*
 - **Multi‑Provider AI Support** — Works with **Google Gemini**, **OpenRouter**, or a local **Ollama** model
 - **Automatic Schema Discovery** — Analyzes your SQLite database and extracts tables, columns, foreign keys, and sample data
-- **Smart Fallback** — If the AI provider is unavailable, a rule‑based NL‑to‑SQL engine generates the query
+- **Schema‑RAG** — Vector-embeds table descriptions and retrieves only the most relevant tables per question, keeping large schemas within the model's context budget
+- **Smart Fallback with Transparency** — If the AI provider is unavailable, a rule‑based NL‑to‑SQL engine generates the query, and the response is tagged with its source so the UI can flag when a fallback answered instead of the AI
+- **SQL Safety Validation** — Every generated query is checked against a destructive-keyword blocklist and executed on a read-only database connection before results are returned
 - **Relevance Checking** — Filters out irrelevant questions (weather, news, jokes, etc.)
-- **Conversation History** — Supports follow‑up questions with context awareness
+- **Conversation History** — Supports follow‑up questions with context awareness, plus a query history sidebar for revisiting past questions
 - **Database Manager** — Upload, select, and delete SQLite databases through the UI
-- **Dark‑mode UI** — Clean, modern chat interface with collapsible SQL blocks and results tables
+- **Schema Explorer** — Expandable panel listing all tables and columns for the active database
+- **Light & Dark Mode** — Toggleable theme with a floating, card-style chat composer
+- **Result Actions** — Copy SQL to clipboard and export results as CSV directly from the chat
 
 ---
 
@@ -114,11 +130,12 @@ AskYourDB/
 ├── templates/
 │   └── index.html                # Chat UI frontend
 ├── static/
-│   └── style.css                 # Dark‑mode styling
-├── databases/                    # Uploaded SQLite databases
-│   ├── northwind.db
+│   └── style.css                 # Light/dark theme styling
+├── databases/                    # SQLite databases + Schema-RAG embedding cache
+│   ├── northwind.db              # Default database
 │   ├── default.db
-│   └── Chinook_Sqlite_AutoIncrementPKs.sqlite
+│   ├── Chinook_Sqlite_AutoIncrementPKs.sqlite
+│   └── schema_embeddings.json    # Cached Schema-RAG embeddings (auto-generated)
 ├── docs/                         # VitePress documentation site
 │   ├── .vitepress/config.js      # Site config (theme, nav, sidebar)
 │   ├── guide/                    # Getting started, architecture, design
@@ -128,9 +145,9 @@ AskYourDB/
 │   └── package.json              # VitePress dependency
 ├── .github/workflows/
 │   └── deploy-docs.yml           # GitHub Pages auto-deploy workflow
-├── test_app_logic.py             # Unit tests (59+ tests)
+├── test_app_logic.py             # Unit tests
 ├── requirements.txt              # Python dependencies
-├── .env                          # API keys (GEMINI_API_KEY, OPENROUTER_API_KEY)
+├── .env.example                  # Template for API keys (copy to .env, which is gitignored)
 ├── LICENSE                       # MIT License
 └── README.md                     # This file
 ```
@@ -164,11 +181,15 @@ AskYourDB/
    AI_PROVIDER = "ollama"   # "google" | "openrouter" | "ollama"
    ```
 
-   Or set API keys in a `.env` file:
+   Or set API keys in a `.env` file (copy `.env.example` to `.env` first):
    ```
    GEMINI_API_KEY=your_gemini_key_here
    OPENROUTER_API_KEY=your_openrouter_key_here
    ```
+
+   By default the app loads `databases/northwind.db` on first launch. Set
+   the `DB_PATH` environment variable to point at a different SQLite file
+   instead.
 
 4. **Start the app**
    ```bash
@@ -288,6 +309,10 @@ The test suite covers:
 - ✅ Data availability checks
 - ✅ NL‑to‑SQL engine unit tests
 - ✅ AI response parsing, follow‑up rewriting, and edge cases
+- ✅ SQL safety validation (destructive keywords, multi-statement rejection)
+- ✅ Cross-schema regression tests (value-matching, multi-hop geography joins, deterministic output)
+
+Run `python -m pytest test_app_logic.py --collect-only -q | tail -1` for the current test count.
 
 ---
 
@@ -320,6 +345,7 @@ AI_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 | GET    | `/`                    | Serve the chat interface           |
 | POST   | `/query`               | Submit a natural language query    |
 | GET    | `/schema`              | Get the current database schema    |
+| GET    | `/history`             | Get conversation history for the sidebar |
 | GET    | `/databases`           | List available databases           |
 | POST   | `/databases/upload`    | Upload a new SQLite database       |
 | POST   | `/databases/select`    | Switch the active database         |
