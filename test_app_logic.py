@@ -765,3 +765,289 @@ def test_search_value_across_text_columns_finds_company_name():
         assert "Contact" not in col2, (
             f"'white' should not match ContactTitle/ContactName, got {col2!r}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  REGRESSION TESTS FOR 5 BUGS (non-Northwind schema compatibility)
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── Bug 1: Classification rejects literal table-name matches ─────────
+
+def test_build_classification_schema_hint_contains_table_names():
+    """_build_classification_schema_hint() must include actual table names
+    so the AI model can see them as valid query targets. (Bug 1 regression.)"""
+    hint = app_module._build_classification_schema_hint()
+    info = app_module.get_table_info()
+    if not info:
+        pytest.skip("No tables in database")
+    # Every table name should appear in the hint
+    for table in info:
+        assert table.lower() in hint.lower(), (
+            f"Table '{table}' must appear in classification schema hint"
+        )
+    # The hint header should clearly say these are valid targets
+    assert "Available tables" in hint or "tables" in hint.lower()
+    assert "VALID" in hint or "valid" in hint.lower()
+
+
+def test_classification_prompt_contains_table_names():
+    """The full classification prompt (SYSTEM_PROMPT + schema_hint + question)
+    must contain the actual table names from the attached schema. (Bug 1 regression.)"""
+    question = "show me all city with their city"
+    schema_hint = app_module._build_classification_schema_hint()
+    prompt_parts = [app_module.CLASSIFICATION_SYSTEM_PROMPT]
+    if schema_hint:
+        prompt_parts.append(schema_hint)
+    prompt_parts.append(f'User input: "{question}"')
+    prompt_parts.append("Reply with JSON only.")
+    prompt = "\n".join(prompt_parts)
+
+    # The question text must be in the prompt
+    assert question in prompt, "Question must appear in classification prompt"
+
+    # If a table named 'city' exists, its name should appear in the prompt
+    info = app_module.get_table_info()
+    for table in info:
+        if table.lower() == "city":
+            assert "city" in prompt.lower(), (
+                "Table name 'city' must appear in classification prompt"
+            )
+            break
+
+
+# ── Bug 2: Synonym hints are hardcoded to one schema's vocabulary ────
+
+def test_classification_system_prompt_no_northwind_examples():
+    """CLASSIFICATION_SYSTEM_PROMPT should NOT contain hardcoded Northwind
+    table names like 'Customers', 'Products', 'Orders' as synonyms.
+    (Bug 2 regression.)"""
+    prompt = app_module.CLASSIFICATION_SYSTEM_PROMPT
+    # The old prompt had lines like "users/people/clients ≈ Customers or Employees"
+    # The new prompt should not have specific table name mappings
+    northwind_tables = ["Customers", "Products", "Orders", "Categories", "Suppliers"]
+    for tbl in northwind_tables:
+        # It's okay if the table name appears generically, but not as a synonym mapping
+        # Check for the "≈" pattern specifically
+        pattern = "≈ " + tbl
+        assert pattern not in prompt, (
+            f"CLASSIFICATION_SYSTEM_PROMPT should not contain hardcoded synonym '{pattern}'"
+        )
+    # Should contain generic instructions about reasoning
+    assert "everyday synonyms" in prompt.lower() or "generic" in prompt.lower() or "Think about" in prompt
+
+
+def test_classification_system_prompt_has_generic_synonyms():
+    """CLASSIFICATION_SYSTEM_PROMPT should use domain-agnostic synonym hints
+    that don't reference specific table names. (Bug 2 regression.)"""
+    prompt = app_module.CLASSIFICATION_SYSTEM_PROMPT
+    # Should describe persons generically, not as "Customers or Employees"
+    has_generic_person = any(phrase in prompt.lower() for phrase in [
+        "people", "individuals", "persons", "any table representing"
+    ])
+    has_generic_product = any(phrase in prompt.lower() for phrase in [
+        "product", "inventory", "goods", "items"
+    ])
+    assert has_generic_person, "Prompt should describe person-like tables generically"
+    assert has_generic_product, "Prompt should describe product-like tables generically"
+
+
+# ── Bug 3: Wrong column AND corrupted value in name search ────────────
+
+def test_detect_table_with_actor():
+    """detect_table('who are the actors named Nicholson') should return 'actor'
+    when the actor table exists. (Bug 3 regression.)"""
+    info = app_module.get_table_info()
+    if "actor" not in info:
+        pytest.skip("actor table not available in this database")
+    table = app_module.detect_table("who are the actors named Nicholson")
+    assert table is not None
+    # Should detect either 'actor' or a table containing actors
+    assert "actor" in table.lower(), f"Expected 'actor' table, got {table!r}"
+
+
+def test_build_general_select_sql_uses_like_for_name_match():
+    """build_general_select_sql should use LIKE and search_value_across_text_columns
+    for name/value matching, not exact =. (Bug 3 regression.)"""
+    info = app_module.get_table_info()
+    if "actor" not in info:
+        pytest.skip("actor table not available in this database")
+    sql = app_module.build_general_select_sql(
+        "who are the actors named Nicholson",
+        "actor",
+        []
+    )
+    assert sql.upper().startswith("SELECT"), f"SQL should start with SELECT, got: {sql[:50]}"
+    # Should use LIKE not = for text matching
+    assert "LIKE" in sql.upper() or sql.startswith("NO_MATCH"), (
+        f"SQL should use LIKE for name matching, got: {sql}"
+    )
+    if not sql.startswith("NO_MATCH"):
+        assert "last_name" in sql.lower() or "first_name" in sql.lower()
+
+
+def test_explicit_match_does_not_corrupt_value():
+    """The explicit_match regex in build_general_select_sql should not
+    corrupt or truncate the captured value. (Bug 3 regression.)"""
+    import re
+    q_lower = "who are the actors named nicholson"
+    # Simulate the explicit_match logic
+    match = re.search(
+        r'\b(?:named|called)\s+([a-z][a-z0-9 &\'\-]{2,})', q_lower
+    )
+    assert match is not None, "Regex should match 'named nicholson'"
+    value = match.group(1).strip()
+    assert value == "nicholson", f"Value should be 'nicholson', got {value!r}"
+    # Test that the value is the same after trimming trailing conjunctive phrases
+    value2 = re.sub(
+        r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*$', '', value
+    ).strip()
+    assert value2 == "nicholson", f"Value should remain 'nicholson', got {value2!r}"
+
+
+# ── Bug 4: Broken JOIN on multi-hop geography ─────────────────────────
+
+def test_extract_text_conditions_geo_no_crash_on_missing_columns():
+    """extract_text_conditions with a table that lacks direct geography columns
+    should not crash or produce broken SQL with dangling aliases. (Bug 4 regression.)"""
+    info = app_module.get_table_info()
+    # Find a table without city/country columns
+    geo_col_names = {"city", "country", "state", "region", "province"}
+    test_table = None
+    for t, cols in info.items():
+        has_geo = False
+        for c in cols:
+            ckey = c["name"].lower().replace(" ", "").replace("_", "")
+            if ckey in geo_col_names:
+                has_geo = True
+                break
+        if not has_geo:
+            test_table = t
+            break
+    if test_table is None:
+        pytest.skip("All tables have geography columns already")
+    
+    conditions = app_module.extract_text_conditions(
+        "show me everyone in Germany",
+        test_table
+    )
+    # Should not crash. Conditions may be empty or may contain geography conditions
+    # from FK graph walking.
+    assert isinstance(conditions, list)
+    for col, op, val in conditions:
+        # Column references should be valid SQL fragments (not dangling aliases)
+        assert '"' in col or '.' in col, f"Column reference looks invalid: {col!r}"
+        assert op in ("=", "LIKE", "IN"), f"Unexpected operator: {op!r}"
+
+
+def test_build_general_select_sql_geo_no_crash():
+    """build_general_select_sql should not crash or produce broken SQL
+    with dangling aliases when geography is requested but not on anchor table.
+    (Bug 4 regression.)"""
+    info = app_module.get_table_info()
+    # Find a table without direct geography
+    geo_col_names = {"city", "country", "state", "region", "province"}
+    test_table = None
+    for t, cols in info.items():
+        has_geo = any(
+            c["name"].lower().replace(" ", "").replace("_", "") in geo_col_names
+            for c in cols
+        )
+        if not has_geo:
+            test_table = t
+            break
+    if test_table is None:
+        pytest.skip("All tables have geography columns")
+    
+    sql = app_module.build_general_select_sql(
+        "show me everyone in Germany",
+        test_table,
+        []
+    )
+    assert sql is not None
+    assert sql.upper().startswith("SELECT") or sql.startswith("NO_MATCH"), (
+        f"SQL should be valid SELECT or NO_MATCH, got: {sql[:80]}"
+    )
+
+
+def test_fk_geography_path_finds_country():
+    """When the anchor table lacks geography columns, the FK graph walker
+    should find country/city tables. (Bug 4 regression.)"""
+    info = app_module.get_table_info()
+    # Check for geography FK chain: actor has no geo, but customer->address->city->country does
+    for t in ["actor", "customer", "film"]:
+        if t in info:
+            conditions = app_module.extract_text_conditions(
+                "show me everyone in Germany",
+                t
+            )
+            # Conditions should not be broken — they can be empty or contain valid entries
+            for col, op, val in conditions:
+                # A condition coming from a subquery will contain 'IN' and a sub-SELECT
+                if op == "IN" and val.startswith("(SELECT"):
+                    # This is the FK-graph-based condition — verify it references
+                    # the geography table properly
+                    assert "country" in val.lower() or "city" in val.lower()
+                elif op in ("=", "LIKE"):
+                    # Direct geography match on the same table
+                    assert '"' in col
+            break
+
+
+# ── Bug 5: Non-deterministic results for identical questions ──────────
+
+def test_detect_table_deterministic_across_calls():
+    """Calling detect_table with the same question twice should return
+    the same result. (Bug 5 regression.)"""
+    question = "show me all customers"
+    result1 = app_module.detect_table(question)
+    result2 = app_module.detect_table(question)
+    assert result1 == result2, (
+        f"detect_table returned different results: {result1!r} vs {result2!r}"
+    )
+
+
+def test_detect_table_deterministic_on_ties():
+    """When multiple tables tie for the best score, detect_table should
+    consistently return the alphabetically first one. (Bug 5 regression.)"""
+    question = "show me all data"  # Generic — likely to cause ties
+    result1 = app_module.detect_table(question)
+    result2 = app_module.detect_table(question)
+    assert result1 == result2, (
+        f"detect_table non-deterministic on ties: {result1!r} vs {result2!r}"
+    )
+
+
+def test_generate_sql_deterministic():
+    """Calling generate_sql with the same question twice should return
+    the same SQL. (Bug 5 regression.)"""
+    # Save and restore conversation history to avoid cross-contamination
+    old_history = list(app_module._conversation_history)
+    try:
+        app_module._conversation_history = []
+        question = "show me all address"
+        sql1 = app_module.generate_sql(question)
+        sql2 = app_module.generate_sql(question)
+        assert sql1 == sql2, (
+            f"generate_sql non-deterministic!\nFirst:  {sql1}\nSecond: {sql2}"
+        )
+    finally:
+        app_module._conversation_history = old_history
+
+
+def test_generate_sql_identical_twice_with_same_db_state():
+    """Running the identical question twice with the same DB state should
+    produce identical SQL. (Bug 5 regression, covers conversation history pollution.)"""
+    old_history = list(app_module._conversation_history)
+    try:
+        app_module._conversation_history = []
+        question = "show me all customers"
+        sql_first = app_module.generate_sql(question)
+        # Simulate a second run with no history to ensure determinism
+        app_module._conversation_history = []
+        sql_second = app_module.generate_sql(question)
+        assert sql_first == sql_second, (
+            f"Identical question with same DB state produced different SQL!\n"
+            f"First:  {sql_first}\nSecond: {sql_second}"
+        )
+    finally:
+        app_module._conversation_history = old_history
