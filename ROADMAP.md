@@ -175,7 +175,7 @@ This is a natural fit for **Botpress**, which provides:
 | Schema retrieval | Schema-RAG (top-k tables) | Same, exposed as a Botpress node |
 | SQL generation | Single LLM call | Multi-agent (Generator + Critic) |
 | Error recovery | 500 error | Self-healing loop |
-| UI | Custom HTML/CSS | Botpress webchat |
+| UI | Custom HTML/CSS | Botpress webchat embed|
 | User sessions | None | Built-in session management |
 | Database connections | SQLite only | Plugin-based (any DB) |
 
