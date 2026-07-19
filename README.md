@@ -43,6 +43,7 @@ AskYourDB is a web application that converts natural language questions into SQL
 │ ask_classification()                        │
 │ • Categories: greeting, showcase, followup, │
 │   db_query, irrelevant                      │
+│ • Schema-aware synonym reasoning            │
 │ • Follow‑up rewrite into standalone query   │
 └─────────────────────────────────────────────┘
        │
