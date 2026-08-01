@@ -2295,7 +2295,10 @@ def execute_sql(sql):
     the statement is safe (SELECT/WITH only, no DDL/DML) via is_safe_select().
     The database is opened in read-only mode as an additional safeguard.
     """
-    if not sql or not is_safe_select(sql):
+    if not sql or not isinstance(sql, str):
+        raise ValueError("Invalid SQL: must be a non-empty string")
+
+    if not is_safe_select(sql):
         raise ValueError("SQL query failed validation: only SELECT/WITH statements are allowed")
 
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
@@ -2309,7 +2312,7 @@ def execute_sql(sql):
         return columns, rows
     except Exception as e:
         conn.close()
-        raise e
+        raise RuntimeError(f"Database query execution failed: {type(e).__name__}") from e
 
 
 @app.route("/databases", methods=["GET"])
