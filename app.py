@@ -2342,6 +2342,33 @@ def is_safe_select(sql: str) -> bool:
     return True
 
 
+def _is_strictly_safe_sql_for_execution(sql: str) -> bool:
+    """Defense-in-depth SQL validation for dynamically generated queries."""
+    if not sql or not isinstance(sql, str):
+        return False
+
+    normalized = re.sub(r'\s+', ' ', sql).strip().lower()
+
+    # Only allow single-statement queries.
+    if ';' in normalized:
+        return False
+
+    # Block inline/block comments often used in injection payloads.
+    if '--' in normalized or '/*' in normalized or '*/' in normalized:
+        return False
+
+    # Block risky SQL features not needed for this endpoint.
+    blocked = (
+        ' union ', ' pragma ', ' attach ', ' detach ', ' vacuum ',
+        ' alter ', ' drop ', ' insert ', ' update ', ' delete ',
+        ' replace ', ' create ', ' reindex ', ' analyze '
+    )
+    if any(tok in f' {normalized} ' for tok in blocked):
+        return False
+
+    return is_safe_select(sql)
+
+
 def execute_sql(sql, params=None):
     """Execute a read-only SQL query against the database and return results.
 
@@ -2370,6 +2397,8 @@ def execute_sql(sql, params=None):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
+        if not _is_strictly_safe_sql_for_execution(sql):
+            raise ValueError("Rejected potentially unsafe SQL query")
         cursor.execute(sql, params)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
