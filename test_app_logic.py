@@ -695,6 +695,53 @@ def test_is_safe_select_rejects_drop_in_cte():
     """DROP inside a CTE must be rejected."""
     assert not app_module.is_safe_select("WITH cte AS (SELECT 1 FROM Customers WHERE 1=1 DROP TABLE Orders) SELECT * FROM cte")
 
+def test_strip_block_comments_removes_complete_comments():
+    """Complete /* ... */ comments are removed, matching the old regex behavior."""
+    strip = app_module._strip_block_comments
+    assert strip("SELECT /* inline */ 1") == "SELECT  1"
+    assert strip("/* a */ SELECT 1") == " SELECT 1"
+    assert strip("SELECT 1 /* trailing */") == "SELECT 1 "
+    assert strip("a /* one */ b /* two */ c") == "a  b  c"
+
+
+def test_strip_block_comments_keeps_unterminated():
+    """An unclosed /* (no */) must be left untouched, matching the regex."""
+    strip = app_module._strip_block_comments
+    assert strip("SELECT /* foo") == "SELECT /* foo"
+    assert strip("SELECT 1 /* a /* b") == "SELECT 1 /* a /* b"
+    assert strip("no comments here") == "no comments here"
+
+
+def test_strip_block_comments_nongreedy_first_close_wins():
+    """The first */ after /* terminates the comment (non-greedy semantics)."""
+    strip = app_module._strip_block_comments
+    assert strip("SELECT /* a /* b */ c") == "SELECT  c"
+    assert strip("/**/") == ""
+
+
+def test_strip_block_comments_is_linear_on_pathological_input():
+    """Many unterminated /* markers must not cause quadratic blowup (ReDoS)."""
+    import time
+    strip = app_module._strip_block_comments
+    evil = "SELECT " + "a/*" * 20000  # no closing */ anywhere
+    start = time.perf_counter()
+    result = strip(evil)
+    elapsed = time.perf_counter() - start
+    assert result == evil  # unchanged
+    assert elapsed < 1.0, f"block comment strip took {elapsed:.3f}s"
+
+
+def test_is_safe_select_handles_pathological_comment_input():
+    """is_safe_select must not hang on pathological comment input (ReDoS)."""
+    import time
+    evil = "SELECT " + "a/*" * 20000
+    start = time.perf_counter()
+    ok = app_module.is_safe_select(evil)
+    elapsed = time.perf_counter() - start
+    assert ok is True  # unterminated comments left as-is, query stays a SELECT
+    assert elapsed < 1.0, f"is_safe_select took {elapsed:.3f}s"
+
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  CLASSIFICATION PROMPT CONSTRUCTION TESTS

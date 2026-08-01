@@ -2146,6 +2146,31 @@ def generate_sql(question):
         return 'SELECT 1'
 
 
+def _strip_block_comments(text: str) -> str:
+    """Remove SQL block comments (/* ... */) in linear time.
+
+    Replaces the ReDoS-prone regex `re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)`
+    with a single linear pass. Semantics are identical: each `/*` is removed up to
+    its first following `*/`; an unterminated `/*` (no closing `*/`) is left in place.
+    """
+    result = []
+    pos = 0
+    n = len(text)
+    while pos < n:
+        start = text.find('/*', pos)
+        if start == -1:
+            result.append(text[pos:])
+            break
+        end = text.find('*/', start + 2)
+        if end == -1:
+            # Unterminated comment: keep remainder as-is (matches regex behavior)
+            result.append(text[pos:])
+            break
+        result.append(text[pos:start])
+        pos = end + 2
+    return ''.join(result)
+
+
 def is_safe_select(sql: str) -> bool:
     """Validate that a SQL statement is a safe read-only SELECT (or WITH ... SELECT).
 
@@ -2161,8 +2186,8 @@ def is_safe_select(sql: str) -> bool:
 
     # Remove single-line comments (-- ...)
     text = re.sub(r'--.*?(\n|$)', '\n', text)
-    # Remove block comments (/* ... */)
-    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    # Remove block comments (/* ... */) -- linear-time scan (ReDoS-safe)
+    text = _strip_block_comments(text)
     text = text.strip()
 
     if not text:
