@@ -47,7 +47,7 @@ if not os.path.exists(DB_PATH):
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  AI PROVIDER CONFIGURATION                                           ║
-# ║  Change these values to switch providers and models.                 ║
+# ║  Change these values to switch providers and models.                 ║j
 # ║  API keys are still loaded from environment variables / .env         ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
