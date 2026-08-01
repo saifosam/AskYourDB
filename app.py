@@ -1368,7 +1368,7 @@ def ask_ollama_classification(question: str, history: list | None = None) -> dic
         if gemini_client:
             print("Ollama classification unavailable, falling back to Gemini.")
             return ask_gemini_classification(question, history)
-        return {"category": "db_query", "rewrite": question, "reason": f"error: {e}"}
+        return {"category": "db_query", "rewrite": question, "reason": "error: classification service unavailable"}
 
 
 def ask_classification(question: str, history: list | None = None) -> dict:
@@ -2238,6 +2238,62 @@ def _strip_block_comments(text: str) -> str:
     return ''.join(result)
 
 
+def _strip_sql_comments(text: str) -> str:
+    """Remove SQL line comments (-- ...) and block comments (/* ... */).
+
+    Shared by is_safe_select() (structural validation) and execute_sql()
+    (literal-parameterization) so both operate on identically-cleaned text.
+    """
+    # Remove single-line comments (-- ...)
+    text = re.sub(r'--.*?(\n|$)', '\n', text)
+    # Remove block comments (/* ... */) -- linear-time scan (ReDoS-safe)
+    return _strip_block_comments(text)
+
+
+def _extract_sql_string_literals(sql: str) -> tuple:
+    """Rewrite every single-quoted SQL string literal into a '?' placeholder,
+    returning (rewritten_sql, params) with the literal contents moved out to
+    a params list.
+
+    This is the mechanism that guarantees literal values reaching execute_sql()
+    -- whether produced by the rule-based NL-to-SQL builder or emitted by an
+    AI provider -- are always sent to the sqlite3 driver as bound parameters
+    rather than embedded in the query text. Bound parameters are the
+    database driver's own defense against SQL injection: the driver never
+    interprets their contents as SQL syntax, so no value (however it was
+    derived from user input) can alter the query's structure.
+
+    Handles the SQL-standard '' escape for an apostrophe within a literal.
+    Only single-quoted literals are touched; double-quoted identifiers
+    (table/column names) are left untouched since sqlite3 placeholders
+    cannot substitute for identifiers.
+    """
+    out = []
+    params = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            j = i + 1
+            literal_chars = []
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        literal_chars.append("'")
+                        j += 2
+                        continue
+                    break
+                literal_chars.append(sql[j])
+                j += 1
+            params.append(''.join(literal_chars))
+            out.append('?')
+            i = j + 1
+        else:
+            out.append(ch)
+            i += 1
+    return ''.join(out), params
+
+
 def is_safe_select(sql: str) -> bool:
     """Validate that a SQL statement is a safe read-only SELECT (or WITH ... SELECT).
 
@@ -2250,11 +2306,7 @@ def is_safe_select(sql: str) -> bool:
         return False
 
     text = sql.strip()
-
-    # Remove single-line comments (-- ...)
-    text = re.sub(r'--.*?(\n|$)', '\n', text)
-    # Remove block comments (/* ... */) -- linear-time scan (ReDoS-safe)
-    text = _strip_block_comments(text)
+    text = _strip_sql_comments(text)
     text = text.strip()
 
     if not text:
@@ -2291,9 +2343,16 @@ def is_safe_select(sql: str) -> bool:
 def execute_sql(sql, params=None):
     """Execute a read-only SQL query against the database and return results.
 
-    SECURITY: This function expects pre-validated SQL. Caller must verify
-    the statement is safe (SELECT/WITH only, no DDL/DML) via is_safe_select().
-    The database is opened in read-only mode as an additional safeguard.
+    SECURITY: This function validates the statement is safe (SELECT/WITH only,
+    no DDL/DML) via is_safe_select(), then -- unless the caller already
+    supplied fully-parameterized SQL via `params` -- rewrites every string
+    literal in the query into a '?' placeholder bound to a parameter value
+    (see _extract_sql_string_literals()). This guarantees no literal value,
+    regardless of how it was derived (rule-based NL-to-SQL builder or an AI
+    provider's generated query), is ever sent to sqlite3 embedded in the
+    query text; only the driver's own bound-parameter mechanism carries
+    literal content, which the driver never interprets as SQL syntax. The
+    database is opened in read-only mode as an additional safeguard.
     """
     if not sql or not isinstance(sql, str):
         raise ValueError("Invalid SQL: must be a non-empty string")
@@ -2301,11 +2360,15 @@ def execute_sql(sql, params=None):
     if not is_safe_select(sql):
         raise ValueError("SQL query failed validation: only SELECT/WITH statements are allowed")
 
+    if params is None:
+        clean_sql = _strip_sql_comments(sql).strip()
+        sql, params = _extract_sql_string_literals(clean_sql)
+
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute(sql, params or ())
+        cursor.execute(sql, params)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
         conn.close()
