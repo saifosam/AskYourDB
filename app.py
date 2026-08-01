@@ -1920,7 +1920,7 @@ def detect_order_by(question):
 
 
 def natural_language_to_sql(question):
-    """Convert a natural language question to SQL."""
+    """Convert a natural language question to SQL and bound params."""
     q_lower = question.lower()
     table = detect_table(question)
     info = get_table_info()
@@ -2069,8 +2069,9 @@ def build_count_group_by_sql(question, table, select_expr, group_table, group_co
 
 
 def build_general_select_sql(question, table, extra_columns):
-    """Build a general SELECT query using schema metadata."""
+    """Build a general SELECT query using schema metadata and bound params."""
     info = get_table_info()
+    params = []
     if table not in info:
         table = next(iter(info.keys())) if info else table
 
@@ -2167,7 +2168,7 @@ def build_general_select_sql(question, table, extra_columns):
                             break
                     else:
                         # Really no match found — return a no-match response indicator
-                        return f"NO_MATCH: no column found containing '{value}' — try a different value"
+                        return f"NO_MATCH: no column found containing '{value}' — try a different value", []
 
     if where_clauses:
         sql += ' WHERE ' + ' AND '.join(sorted(set(where_clauses)))
@@ -2180,7 +2181,7 @@ def build_general_select_sql(question, table, extra_columns):
     elif not is_summary_query(question):
         sql += ' LIMIT 100'
 
-    return sql
+    return sql, params
 
 
 def quote_sql_value(value: str) -> str:
@@ -2197,7 +2198,7 @@ def is_summary_query(question):
 def generate_sql(question):
     """Main entry point for NL-to-SQL conversion."""
     try:
-        sql = natural_language_to_sql(question)
+        sql, params = natural_language_to_sql(question)
         sql = re.sub(r'\s+', ' ', sql).strip()
         if not sql.upper().startswith('SELECT'):
             first_table = next(iter(get_table_info().keys()), None)
@@ -2205,12 +2206,13 @@ def generate_sql(question):
                 sql = f'SELECT * FROM "{first_table}" LIMIT 50'
             else:
                 sql = 'SELECT 1'
-        return sql
+            params = []
+        return sql, params
     except Exception:
         first_table = next(iter(get_table_info().keys()), None)
         if first_table:
-            return f'SELECT * FROM "{first_table}" LIMIT 50'
-        return 'SELECT 1'
+            return f'SELECT * FROM "{first_table}" LIMIT 50', []
+        return 'SELECT 1', []
 
 
 def _strip_block_comments(text: str) -> str:
@@ -2554,8 +2556,9 @@ def query():
         "gemini" if AI_PROVIDER == "google" and from_ai else
         "fallback_rules"
     )
+    sql_params = None
     if not sql:
-        sql = generate_sql(question)
+        sql, sql_params = generate_sql(question)
         source = "fallback_rules"
         print(f"[STAGE_LOG] query() stage=5 (fallback_sql_generation) sql={sql[:80]!r}")
 
@@ -2581,7 +2584,7 @@ def query():
 
     try:
         print(f"[STAGE_LOG] query() stage=6 (execute_sql) sql={sql[:100]!r}")
-        columns, results = execute_sql(sql)
+        columns, results = execute_sql(sql, sql_params)
 
         # Check for revenue/sum/aggregate queries returning empty results (e.g. date filters with no matching data)
         if not results and ('SUM(' in sql.upper() or 'COUNT(' in sql.upper()) and any(term in sql.upper() for term in ('WHERE', 'BETWEEN', 'YEAR(')):
