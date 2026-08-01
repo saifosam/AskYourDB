@@ -917,7 +917,7 @@ def rewrite_followup_question(question: str, history: list) -> str:
     if contains_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
         return f"what are the people whose names contain {contains_match.group(1)}"
 
-    followup_match = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+(.+)$", q, re.I)
+    followup_match = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+(.+?)(?:\?|!|\.)?$", q, re.I)
     if followup_match:
         specific = followup_match.group(1).strip()
         if specific:
@@ -2084,7 +2084,7 @@ def build_general_select_sql(question, table, extra_columns):
         if explicit_match:
             value = explicit_match.group(1).strip()
             # Trim trailing conjunctive phrases like "in the name", "in the company", etc.
-            value = re.sub(r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*$', '', value).strip()
+            value = re.sub(r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*?$', '', value).strip()
             if value and not re.match(r'^(what|who|show|list|find|give|give me|the|all|me)\b', value):
                 # First try to find which column actually contains this value
                 found_col = search_value_across_text_columns(value, table, info)
@@ -2223,7 +2223,15 @@ def is_safe_select(sql: str) -> bool:
 
 
 def execute_sql(sql):
-    """Execute a read-only SQL query against the database and return results."""
+    """Execute a read-only SQL query against the database and return results.
+
+    SECURITY: This function expects pre-validated SQL. Caller must verify
+    the statement is safe (SELECT/WITH only, no DDL/DML) via is_safe_select().
+    The database is opened in read-only mode as an additional safeguard.
+    """
+    if not sql or not is_safe_select(sql):
+        raise ValueError("SQL query failed validation: only SELECT/WITH statements are allowed")
+
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -2470,7 +2478,7 @@ def query():
     except Exception as e:
         print(f"[STAGE_LOG] query() stage=6 (execute_sql_error) error={e!r}")
         return jsonify({
-            "error": str(e),
+            "error": "An error occurred while executing the query. Please try rephrasing your question.",
             "is_relevant": True,
             "sql": None,
             "results": []
