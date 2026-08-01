@@ -47,7 +47,7 @@ if not os.path.exists(DB_PATH):
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  AI PROVIDER CONFIGURATION                                           ║
-# ║  Change these values to switch providers and models.                 ║j
+# ║  Change these values to switch providers and models.                 ║
 # ║  API keys are still loaded from environment variables / .env         ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -901,7 +901,7 @@ def rewrite_followup_question(question: str, history: list) -> str:
     if not re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\b", q, re.I):
         return q
 
-    target_match = re.search(r"(?:what about|how about|and|or|also)\s+([a-z][a-z .'-]+)$", q, re.I)
+    target_match = re.search(r"(?:what about|how about|and|or|also)\s+([a-z][\w .'\-]+)$", q, re.I)
     if not target_match:
         return q
 
@@ -928,8 +928,9 @@ def rewrite_followup_question(question: str, history: list) -> str:
             if "orders" in prev_lower:
                 return f"what are the orders in {specific}"
 
-    if re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I):
-        specific = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][a-z .'-]*)$", q, re.I).group(1).strip()
+    specific_match = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][\w .'\-]*)$", q, re.I)
+    if specific_match:
+        specific = specific_match.group(1).strip()
         if "people" in prev_lower or "customers" in prev_lower or "employees" in prev_lower or "employee" in prev_lower:
             return f"what are the people in {specific}"
         if "products" in prev_lower:
@@ -1566,7 +1567,7 @@ def extract_text_conditions(question, table):
     contains = re.search(r'(?:name|names)\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q_lower)
     in_name = re.search(r'with\s+(?:a\s+)?([a-z])\s+(?:in|inside)\s+their\s+name\b', q_lower)
     # Broader pattern for "with [word(s)] in the/their name" (handles multi-character values)
-    with_in_name = re.search(r'with\s+(?:a\s+)?([a-z][a-z\s]*?)\s+in\s+(?:the\s+)?(?:their\s+)?name\b', q_lower) if not (starts_with or contains or in_name) else None
+    with_in_name = re.search(r'with\s+(?:a\s+)?([a-z]\w*(?:\s+\w+)*)\s+in\s+(?:the\s+)?(?:their\s+)?name\b', q_lower) if not (starts_with or contains or in_name) else None
 
     if (starts_with or contains or in_name or with_in_name) and name_cols:
         if starts_with:
@@ -1705,11 +1706,11 @@ def extract_text_conditions(question, table):
         has_like = any(c[1] == "LIKE" for c in conditions)
         if not has_like:
             # Try to extract a meaningful value word from the question
-            value_match = re.search(r'(?:about|of|for|with)\s+([a-z][a-z\s]+?)(?:\s+in\s+the\s+name)?$', q_lower)
+            value_match = re.search(r'(?:about|of|for|with)\s+(\S+(?:\s+\S+)*)(?:\s+in\s+the\s+name)?$', q_lower)
             if not value_match:
-                value_match = re.search(r'\b(named|called)\s+([a-z][a-z\s]+?)$', q_lower)
+                value_match = re.search(r'\b(?:named|called)\s+(\S+(?:\s+\S+)*)$', q_lower)
             if value_match:
-                raw_value = value_match.group(1) if value_match.lastindex == 1 else value_match.group(2)
+                raw_value = value_match.group(1).strip()
                 # Use the new cross-column search helper
                 found_col = search_value_across_text_columns(raw_value.strip(), table, info)
                 if found_col:
