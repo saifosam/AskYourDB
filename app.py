@@ -898,7 +898,9 @@ def rewrite_followup_question(question: str, history: list) -> str:
     prev_lower = prev.lower()
 
     # If the question doesn't start with a follow-up indicator, return as-is
-    if not re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\b", q, re.I):
+    followup_starts = ('what about', 'how about', 'and ', 'or ', 'also ', 'now ', 'next ', 'continue ', 'same ')
+    is_followup = any(q.lower().startswith(prefix) for prefix in followup_starts)
+    if not is_followup:
         return q
 
     target = None
@@ -915,12 +917,24 @@ def rewrite_followup_question(question: str, history: list) -> str:
     if "people who live in" in prev_lower or "people live in" in prev_lower:
         return f"what are the people who live in {target}"
 
-    starts_with_match = re.search(r'^(?:what about|how about|and|or|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q, re.I)
-    contains_match = re.search(r'^(?:what about|how about|and|or|also|now|next|continue|same)\s+(?:those\s+)?whose\s+name\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q, re.I)
-    if starts_with_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
-        return f"what are the people whose names start with {starts_with_match.group(1)}"
-    if contains_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
-        return f"what are the people whose names contain {contains_match.group(1)}"
+    # Check for "whose name starts/contains" patterns using string operations
+    starts_with_letter = None
+    contains_letter = None
+
+    if 'whose name' in q.lower():
+        if any(p in q.lower() for p in [' starts with ', ' start with ']):
+            m = re.search(r"whose\s+name\s+starts?\s+with\s+(?:a\s+)?([a-z])\b", q, re.I)
+            if m:
+                starts_with_letter = m.group(1)
+        if any(p in q.lower() for p in [' contains ', ' has ', ' include']):
+            m = re.search(r"whose\s+name\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b", q, re.I)
+            if m:
+                contains_letter = m.group(1)
+
+    if starts_with_letter and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
+        return f"what are the people whose names start with {starts_with_letter}"
+    if contains_letter and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
+        return f"what are the people whose names contain {contains_letter}"
 
     followup_indicators = ('what about ', 'how about ', 'and ', 'or ', 'also ', 'now ', 'next ', 'continue ', 'same ')
     specific = None
