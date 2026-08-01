@@ -901,11 +901,16 @@ def rewrite_followup_question(question: str, history: list) -> str:
     if not re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\b", q, re.I):
         return q
 
-    target_match = re.search(r"(?:what about|how about|and|or|also)\s+([a-z][\w .'\-]+)$", q, re.I)
-    if not target_match:
-        return q
+    target = None
+    target_prefixes = ['what about ', 'how about ', 'and ', 'or ', 'also ']
+    for prefix in target_prefixes:
+        if prefix.lower() in q.lower():
+            idx = q.lower().find(prefix.lower())
+            target = q[idx + len(prefix):].strip()
+            break
 
-    target = target_match.group(1).strip()
+    if not target:
+        return q
 
     if "people who live in" in prev_lower or "people live in" in prev_lower:
         return f"what are the people who live in {target}"
@@ -917,16 +922,20 @@ def rewrite_followup_question(question: str, history: list) -> str:
     if contains_match and ("employees" in prev_lower or "people" in prev_lower or "customer" in prev_lower or "company" in prev_lower):
         return f"what are the people whose names contain {contains_match.group(1)}"
 
-    followup_match = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+(.+?)(?:\?|!|\.)?$", q, re.I)
-    if followup_match:
-        specific = followup_match.group(1).strip()
-        if specific:
-            if "people" in prev_lower or "customers" in prev_lower or "employees" in prev_lower or "employee" in prev_lower:
-                return f"what are the people in {specific}"
-            if "products" in prev_lower:
-                return f"what are the products in {specific}"
-            if "orders" in prev_lower:
-                return f"what are the orders in {specific}"
+    followup_indicators = ('what about ', 'how about ', 'and ', 'or ', 'also ', 'now ', 'next ', 'continue ', 'same ')
+    specific = None
+    for indicator in followup_indicators:
+        if q.lower().startswith(indicator):
+            specific = q[len(indicator):].rstrip('?!.').strip()
+            break
+
+    if specific:
+        if "people" in prev_lower or "customers" in prev_lower or "employees" in prev_lower or "employee" in prev_lower:
+            return f"what are the people in {specific}"
+        if "products" in prev_lower:
+            return f"what are the products in {specific}"
+        if "orders" in prev_lower:
+            return f"what are the orders in {specific}"
 
     specific_match = re.match(r"^(?:what about|how about|and|or|also|now|next|continue|same)\s+([a-z][\w .'\-]*)$", q, re.I)
     if specific_match:
@@ -1563,23 +1572,46 @@ def extract_text_conditions(question, table):
     name_cols = get_preferred_text_columns(table, info)
 
     # ── Name prefix / contains patterns (works for ANY table) ───────────
-    starts_with = re.search(r'(?:name|names)\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q_lower)
-    contains = re.search(r'(?:name|names)\s+(?:contains|has|includes?)\s+(?:a\s+)?([a-z])\b', q_lower)
-    in_name = re.search(r'with\s+(?:a\s+)?([a-z])\s+(?:in|inside)\s+their\s+name\b', q_lower)
-    # Broader pattern for "with [word(s)] in the/their name" (handles multi-character values)
-    with_in_name = re.search(r'with\s+(?:a\s+)?([a-z]\w*(?:\s+\w+)*)\s+in\s+(?:the\s+)?(?:their\s+)?name\b', q_lower) if not (starts_with or contains or in_name) else None
+    like_val = None
 
-    if (starts_with or contains or in_name or with_in_name) and name_cols:
-        if starts_with:
-            like_val = starts_with.group(1).upper() + '%'
-        elif contains:
-            like_val = '%' + contains.group(1).upper() + '%'
-        elif in_name:
-            like_val = '%' + in_name.group(1).upper() + '%'
-        else:
-            # with_in_name: value directly captured ("a " prefix is outside the group)
-            val = with_in_name.group(1).strip()
-            like_val = '%' + val.upper() + '%'
+    # Check for "name/names starts with" pattern
+    if re.search(r'\bname[s]?\s+starts?\s+with', q_lower):
+        m = re.search(r'\bname[s]?\s+starts?\s+with\s+(?:a\s+)?([a-z])\b', q_lower)
+        if m:
+            like_val = m.group(1).upper() + '%'
+    # Check for "name/names contains/has/includes" pattern using string operations
+    elif any(phrase in q_lower for phrase in [' contains ', ' has ', ' include', 'names ']):
+        # Look for name or names followed by contains/has/includes
+        for phrase in [' contains ', ' has ', ' include']:
+            if 'name' in q_lower and phrase in q_lower:
+                name_idx = q_lower.rfind('name')
+                phrase_idx = q_lower.find(phrase)
+                if name_idx < phrase_idx:
+                    after_phrase = q_lower[phrase_idx + len(phrase):].lstrip()
+                    if after_phrase and after_phrase[0].isalpha():
+                        val = after_phrase[0] if after_phrase else ''
+                        if val:
+                            like_val = '%' + val.upper() + '%'
+                            break
+    # Check for "with [char] in their name" pattern
+    elif re.search(r'\bwith\s+[a-z]\s+(?:in|inside)\s+(?:their\s+)?name', q_lower):
+        m = re.search(r'\bwith\s+(?:a\s+)?([a-z])\s+(?:in|inside)\s+(?:their\s+)?name', q_lower)
+        if m:
+            like_val = '%' + m.group(1).upper() + '%'
+    # Check for "with [words] in the/their name" pattern using string operations
+    elif ' in ' in q_lower and 'with ' in q_lower:
+        # Simple string-based extraction to avoid ReDoS
+        with_idx = q_lower.find('with ')
+        if with_idx >= 0:
+            after_with = q_lower[with_idx + 5:]
+            in_idx = after_with.find(' in ')
+            if in_idx > 0:
+                val = after_with[:in_idx].strip()
+                # Basic validation: value should start with a letter
+                if val and val[0].isalpha():
+                    like_val = '%' + val.upper() + '%'
+
+    if like_val and name_cols:
         conditions.append((f'"{table}"."{name_cols[0]}"', "LIKE", f"'{like_val}'"))
 
     # ── Geography column matching (city, country, etc.) ────────────────
@@ -1705,12 +1737,24 @@ def extract_text_conditions(question, table):
         # Skip if we already have a LIKE condition for this column (avoid redundant filters)
         has_like = any(c[1] == "LIKE" for c in conditions)
         if not has_like:
-            # Try to extract a meaningful value word from the question
-            value_match = re.search(r'(?:about|of|for|with)\s+(\S+(?:\s+\S+)*)(?:\s+in\s+the\s+name)?$', q_lower)
-            if not value_match:
-                value_match = re.search(r'\b(?:named|called)\s+(\S+(?:\s+\S+)*)$', q_lower)
-            if value_match:
-                raw_value = value_match.group(1).strip()
+            raw_value = None
+
+            # Try to extract value after "about/of/for/with" or "named/called"
+            for prefix in ["about ", "of ", "for ", "with "]:
+                if prefix in q_lower:
+                    idx = q_lower.rfind(prefix)
+                    raw_value = q_lower[idx + len(prefix):].split(" in the name")[0].strip()
+                    if raw_value:
+                        break
+
+            if not raw_value:
+                for prefix in ["named ", "called "]:
+                    if prefix in q_lower:
+                        idx = q_lower.rfind(prefix)
+                        raw_value = q_lower[idx + len(prefix):].rstrip('?!.').strip()
+                        break
+
+            if raw_value:
                 # Use the new cross-column search helper
                 found_col = search_value_across_text_columns(raw_value.strip(), table, info)
                 if found_col:
@@ -2084,7 +2128,15 @@ def build_general_select_sql(question, table, extra_columns):
         if explicit_match:
             value = explicit_match.group(1).strip()
             # Trim trailing conjunctive phrases like "in the name", "in the company", etc.
-            value = re.sub(r'\s+in\s+(?:the\s+)?(?:their\s+)?(?:name|company|product|category|title).*?$', '', value).strip()
+            trim_phrases = [' in the name', ' in their name', ' in name',
+                           ' in the company', ' in their company', ' in company',
+                           ' in the product', ' in their product', ' in product',
+                           ' in the category', ' in their category', ' in category',
+                           ' in the title', ' in their title', ' in title']
+            for phrase in trim_phrases:
+                if phrase in value:
+                    value = value[:value.index(phrase)].strip()
+                    break
             if value and not re.match(r'^(what|who|show|list|find|give|give me|the|all|me)\b', value):
                 # First try to find which column actually contains this value
                 found_col = search_value_across_text_columns(value, table, info)
