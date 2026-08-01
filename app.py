@@ -2288,7 +2288,7 @@ def is_safe_select(sql: str) -> bool:
     return True
 
 
-def execute_sql(sql):
+def execute_sql(sql, params=None):
     """Execute a read-only SQL query against the database and return results.
 
     SECURITY: This function expects pre-validated SQL. Caller must verify
@@ -2305,7 +2305,7 @@ def execute_sql(sql):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute(sql)
+        cursor.execute(sql, params or ())
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
         conn.close()
