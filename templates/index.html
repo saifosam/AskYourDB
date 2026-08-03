@@ -15,18 +15,39 @@
 
         <div class="content-row">
         <!-- ═══ SIDEBAR ═══ -->
-        <aside class="sidebar" id="sidebar" aria-label="Query history">
-            <div class="sidebar-header">
-                <div class="sidebar-title-row">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        <aside class="sidebar open" id="sidebar" aria-label="Query history">
+            <div class="sidebar-brand">
+                <div class="sidebar-brand-icon">
+                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
+                        <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
+                        <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
                     </svg>
-                    <span>History</span>
                 </div>
-                <button class="sidebar-close" id="sidebarClose" aria-label="Close sidebar">×</button>
+                <span class="sidebar-brand-text">AskYourDB</span>
             </div>
+
+            <button class="new-chat-button" id="newChatButton">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                New chat
+            </button>
+
+            <div class="sidebar-section-label">Today</div>
             <div class="sidebar-body" id="sidebarBody">
                 <div class="sidebar-empty">No queries yet. Ask a question to get started.</div>
+            </div>
+
+            <div class="sidebar-footer">
+                <div class="sidebar-user-avatar">U</div>
+                <div class="sidebar-user-name">You</div>
+                <button class="sidebar-theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
+                    <svg class="sun-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                    </svg>
+                    <svg class="moon-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                </button>
             </div>
         </aside>
 
@@ -40,24 +61,8 @@
                             <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
                         </svg>
                     </button>
-                    <div class="logo-icon">
-                        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                            <ellipse cx="10" cy="3.5" rx="7" ry="2"/>
-                            <path d="M3 3.5V16.5C3 17.6 6.1 18.5 10 18.5C13.9 18.5 17 17.6 17 16.5V3.5"/>
-                            <path d="M3 10C3 11.1 6.1 12 10 12C13.9 12 17 11.1 17 10"/>
-                        </svg>
-                    </div>
                     <h1>AskYourDB</h1>
-                </div>
-                <div class="header-right">
-                    <button class="theme-toggle" id="themeToggle" title="Toggle theme" aria-label="Toggle theme">
-                        <svg class="sun-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-                        </svg>
-                        <svg class="moon-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                        </svg>
-                    </button>
+                    <span class="header-db-badge db-name-text" id="headerDbName">Unknown</span>
                 </div>
             </header>
 
@@ -120,16 +125,17 @@
                     ></textarea>
                     <div class="composer-controls">
                         <div class="composer-controls-left">
-                            <span class="db-pill">DB: <strong class="db-name-text" id="currentDbName">Unknown</strong></span>
-                            <button class="control-pill open-db-manager">Manage</button>
+                            <span class="db-pill">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+                                <strong class="db-name-text" id="currentDbName">Unknown</strong>
+                            </span>
+                            <button class="manage-button open-db-manager">Manage</button>
                             <button class="db-schema-summary control-pill" id="dbSchemaSummary" title="Click to explore schema">Schema: loading...</button>
                         </div>
-                        <button id="sendButton" class="composer-send" disabled>
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <line x1="22" y1="2" x2="11" y2="13"></line>
-                                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        <button id="sendButton" class="composer-send" disabled aria-label="Send message" title="Send">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
                             </svg>
-                            Send
                         </button>
                     </div>
                 </div>
@@ -210,14 +216,15 @@
         const loadingOverlay = document.getElementById('loadingOverlay');
         const sidebar = document.getElementById('sidebar');
         const sidebarToggle = document.getElementById('sidebarToggle');
-        const sidebarClose = document.getElementById('sidebarClose');
         const sidebarBody = document.getElementById('sidebarBody');
         const schemaSummary = document.getElementById('dbSchemaSummary');
         const schemaPanel = document.getElementById('schemaPanel');
         const schemaPanelBody = document.getElementById('schemaPanelBody');
+        const newChatButton = document.getElementById('newChatButton');
+        const welcomeHTML = messagesContainer.innerHTML;
         // State
         let isLoading = false;
-        let isSidebarOpen = false;
+        let isSidebarOpen = true;
         let isSchemaOpen = false;
         let schemaData = null;
 
@@ -243,7 +250,6 @@
         //  Query History Sidebar
         // ═══════════════════════════════════════════════════════════════════
         sidebarToggle.addEventListener('click', toggleSidebar);
-        sidebarClose.addEventListener('click', toggleSidebar);
 
         function toggleSidebar() {
             isSidebarOpen = !isSidebarOpen;
@@ -291,9 +297,33 @@
             clearBtn.textContent = 'Clear history';
             clearBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
+                try {
+                    await fetch('/history/clear', { method: 'POST' });
+                } catch (e) {}
                 sidebarBody.innerHTML = '<div class="sidebar-empty">No queries yet.</div>';
             });
             sidebarBody.appendChild(clearBtn);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  New Chat
+        // ═══════════════════════════════════════════════════════════════════
+        newChatButton.addEventListener('click', startNewChat);
+
+        async function startNewChat() {
+            questionInput.value = '';
+            questionInput.style.height = 'auto';
+            sendButton.disabled = true;
+
+            messagesContainer.innerHTML = welcomeHTML;
+            loadWelcomeSuggestions();
+
+            try {
+                await fetch('/history/clear', { method: 'POST' });
+            } catch (e) {}
+            if (isSidebarOpen) loadSidebarHistory();
+
+            questionInput.focus();
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -1133,6 +1163,7 @@
         // Init
         loadDatabaseList();
         loadWelcomeSuggestions();
+        if (isSidebarOpen) loadSidebarHistory();
     </script>
 </body>
 </html>

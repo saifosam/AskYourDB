@@ -2662,6 +2662,14 @@ def history():
     return jsonify(_conversation_history)
 
 
+@app.route("/history/clear", methods=["POST"])
+def clear_history():
+    """Clear conversation/follow-up history (used by the 'New chat' action)."""
+    global _conversation_history
+    _conversation_history = []
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
     # Initialize schema cache
     get_table_info()
