@@ -1,5 +1,6 @@
 import pytest
 import sys
+import sqlite3
 import types
 
 # Mock google.genai BEFORE importing app.py (it may not be installed in CI)
@@ -1205,3 +1206,123 @@ def test_classification_prompt_contains_generic_synonyms_no_northwind():
     # Should contain common-sense directive
     assert "Common-sense rule" in prompt
     assert "conceptually related" in prompt.lower()
+
+
+# \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+#  SELF-HEALING SQL EXECUTION TESTS
+# \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+
+def test_build_sql_prompt_includes_retry_context():
+    """When retry_context is supplied, the prompt must surface the failed
+    SQL and the DB error so the model can correct itself."""
+    prompt = app_module._build_sql_prompt(
+        "show me all customers",
+        retry_context={"sql": "SELECT foo FROM Customers", "error": "no such column: foo"},
+    )
+    assert "SELECT foo FROM Customers" in prompt
+    assert "no such column: foo" in prompt
+
+
+def test_build_sql_prompt_omits_retry_context_when_absent():
+    prompt = app_module._build_sql_prompt("show me all customers")
+    assert "previous SQL for this question failed" not in prompt
+
+
+def _stub_pipeline(monkeypatch, module):
+    """Bypass relevance/classification/followup/availability stages so a
+    /query request deterministically reaches SQL generation + execution,
+    without depending on a live AI classification service."""
+    monkeypatch.setattr(module, "check_relevance", lambda q, h=None: {"relevant": True, "reason": "Relevant"})
+    monkeypatch.setattr(module, "ask_classification", lambda q, h=None: {"category": "db_query", "rewrite": q})
+    monkeypatch.setattr(module, "rewrite_followup_question", lambda q, h: q)
+    monkeypatch.setattr(module, "check_data_availability", lambda q: {"available": True, "reason": "Available"})
+
+
+def test_query_self_heals_after_execution_error(monkeypatch):
+    """A first SQL attempt that fails to execute should be retried with the
+    error fed back to the AI; a successful second attempt should return 200."""
+    _stub_pipeline(monkeypatch, app_module)
+    monkeypatch.setattr(app_module, "_conversation_history", [])
+
+    calls = []
+
+    def fake_ask_ai(question, retry_context=None):
+        calls.append(retry_context)
+        if retry_context is None:
+            return {"action": "SQL", "sql": "SELECT NoSuchColumn FROM Customers"}
+        return {"action": "SQL", "sql": "SELECT CompanyName FROM Customers"}
+
+    real_execute_sql = app_module.execute_sql
+
+    def fake_execute_sql(sql, params=None):
+        if "NoSuchColumn" in sql:
+            raise RuntimeError("Database query execution failed: OperationalError") from sqlite3.OperationalError("no such column: NoSuchColumn")
+        return real_execute_sql(sql, params)
+
+    monkeypatch.setattr(app_module, "ask_ai", fake_ask_ai)
+    monkeypatch.setattr(app_module, "execute_sql", fake_execute_sql)
+
+    client = app_module.app.test_client()
+    resp = client.post("/query", json={"question": "show me all customers"})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["sql"] == "SELECT CompanyName FROM Customers"
+    assert len(calls) == 2
+    assert calls[0] is None
+    assert calls[1] == {"sql": "SELECT NoSuchColumn FROM Customers", "error": "no such column: NoSuchColumn"}
+
+
+def test_query_gives_up_after_max_retry_attempts(monkeypatch):
+    """If every attempt fails to execute, /query must return a clean 500
+    after MAX_SQL_RETRY_ATTEMPTS + 1 tries, not hang or loop forever."""
+    _stub_pipeline(monkeypatch, app_module)
+    monkeypatch.setattr(app_module, "_conversation_history", [])
+
+    calls = []
+
+    def fake_ask_ai(question, retry_context=None):
+        calls.append(retry_context)
+        return {"action": "SQL", "sql": "SELECT AlwaysBroken FROM Customers"}
+
+    def fake_execute_sql(sql, params=None):
+        raise RuntimeError("Database query execution failed: OperationalError") from sqlite3.OperationalError("no such column: AlwaysBroken")
+
+    monkeypatch.setattr(app_module, "ask_ai", fake_ask_ai)
+    monkeypatch.setattr(app_module, "execute_sql", fake_execute_sql)
+
+    client = app_module.app.test_client()
+    resp = client.post("/query", json={"question": "show me all customers"})
+
+    assert resp.status_code == 500
+    assert len(calls) == app_module.MAX_SQL_RETRY_ATTEMPTS + 1
+
+
+def test_query_does_not_retry_rule_based_fallback_sql(monkeypatch):
+    """A failure from the deterministic rule-based fallback (not the AI)
+    should not be retried, since re-running it would reproduce the same
+    error every time."""
+    _stub_pipeline(monkeypatch, app_module)
+    monkeypatch.setattr(app_module, "_conversation_history", [])
+
+    ask_ai_calls = []
+
+    def fake_ask_ai(question, retry_context=None):
+        ask_ai_calls.append(retry_context)
+        return {"action": "FALLBACK"}
+
+    def fake_generate_sql(question):
+        return "SELECT BrokenColumn FROM Customers", None
+
+    def fake_execute_sql(sql, params=None):
+        raise RuntimeError("Database query execution failed: OperationalError") from sqlite3.OperationalError("no such column: BrokenColumn")
+
+    monkeypatch.setattr(app_module, "ask_ai", fake_ask_ai)
+    monkeypatch.setattr(app_module, "generate_sql", fake_generate_sql)
+    monkeypatch.setattr(app_module, "execute_sql", fake_execute_sql)
+
+    client = app_module.app.test_client()
+    resp = client.post("/query", json={"question": "show me all customers"})
+
+    assert resp.status_code == 500
+    assert len(ask_ai_calls) == 1

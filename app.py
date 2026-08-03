@@ -489,6 +489,10 @@ SQL_SYSTEM_PROMPT = (
 _conversation_history = []
 MAX_HISTORY = 5
 
+# Self-healing SQL: number of extra LLM attempts after an execution failure,
+# each fed the prior query and the DB error so the model can correct itself.
+MAX_SQL_RETRY_ATTEMPTS = 2
+
 
 def _safe_text(response) -> str:
     """Safely extract text from a Gemini response, returning '' on empty/blocked."""
@@ -1015,8 +1019,13 @@ def _build_schema_prompt(question: str | None = None) -> str:
     return schema_summary_compact(MAX_SCHEMA_TOKENS)
 
 
-def _build_sql_prompt(question: str) -> str:
-    """Build the full prompt for SQL generation including rich schema context."""
+def _build_sql_prompt(question: str, retry_context: dict | None = None) -> str:
+    """Build the full prompt for SQL generation including rich schema context.
+
+    retry_context, when set, carries the previously generated SQL and the
+    database error it produced, so the model can correct its own mistake
+    instead of repeating it (self-healing SQL execution).
+    """
     schema = _build_schema_prompt(question)
     history_lines = ""
     if _conversation_history:
@@ -1042,11 +1051,22 @@ def _build_sql_prompt(question: str) -> str:
     if hint_section:
         hint_section = "\n" + hint_section + "\n"
 
+    retry_section = ""
+    if retry_context:
+        retry_section = (
+            f"\nYour previous SQL for this question failed to execute:\n"
+            f"SQL: {retry_context['sql']}\n"
+            f"Error: {retry_context['error']}\n"
+            "Fix the query to resolve this error (e.g. correct a column/table name, fix a join, or "
+            "adjust syntax). Do not repeat the same mistake.\n"
+        )
+
     return (
         f"Attached SQLite DB schema (includes columns, types, sample data, foreign keys, and key column values):\n"
         f"{schema}\n"
         f"{hint_section}"
-        f"{history_lines}\n"
+        f"{history_lines}"
+        f"{retry_section}\n"
         f"New question: \"{question}\"\n\n"
         "Respond with one of:\n"
         "• SQL: <sqlite SELECT query>   — if answerable from this schema (use history for follow-ups)\n"
@@ -1057,7 +1077,7 @@ def _build_sql_prompt(question: str) -> str:
     )
 
 
-def ask_gemini(question: str) -> dict:
+def ask_gemini(question: str, retry_context: dict | None = None) -> dict:
     """
     Single Gemini call that uses rich database analysis for accurate SQL generation.
 
@@ -1070,7 +1090,7 @@ def ask_gemini(question: str) -> dict:
         return {"action": "FALLBACK"}
 
     model = AI_GOOGLE_MODEL
-    prompt = _build_sql_prompt(question)
+    prompt = _build_sql_prompt(question, retry_context)
 
     try:
         response = gemini_client.models.generate_content(
@@ -1103,12 +1123,12 @@ def _ollama_request(json_payload: dict):
         raise
 
 
-def ask_openrouter(question: str) -> dict:
+def ask_openrouter(question: str, retry_context: dict | None = None) -> dict:
     if AI_PROVIDER != "openrouter" or not OPENROUTER_API_KEY:
         return {"action": "FALLBACK"}
 
     model = AI_OPENROUTER_MODEL
-    prompt = _build_sql_prompt(question)
+    prompt = _build_sql_prompt(question, retry_context)
 
     try:
         response = _openrouter_request({
@@ -1136,15 +1156,15 @@ def ask_openrouter(question: str) -> dict:
         print(f"ask_openrouter error: {e}")
         if gemini_client:
             print("OpenRouter unavailable, falling back to Gemini for SQL generation.")
-            return ask_gemini(question)
+            return ask_gemini(question, retry_context)
         print("OpenRouter unavailable and Gemini unavailable, using local rule-based SQL fallback.")
         return {"action": "FALLBACK"}
 
 
-def ask_ollama(question: str) -> dict:
+def ask_ollama(question: str, retry_context: dict | None = None) -> dict:
     """Generate SQL using a locally running Ollama model."""
     model = AI_OLLAMA_MODEL
-    prompt = _build_sql_prompt(question)
+    prompt = _build_sql_prompt(question, retry_context)
 
     try:
         response = _ollama_request({
@@ -1178,7 +1198,7 @@ def ask_ollama(question: str) -> dict:
         print(f"ask_ollama: unexpected error ({type(e).__name__}): {e}")
         if gemini_client:
             print("Ollama unavailable, falling back to Gemini for SQL generation.")
-            return ask_gemini(question)
+            return ask_gemini(question, retry_context)
         return {"action": "FALLBACK"}
 
 
@@ -1380,12 +1400,12 @@ def ask_classification(question: str, history: list | None = None) -> dict:
     return ask_gemini_classification(question, history)
 
 
-def ask_ai(question: str) -> dict:
+def ask_ai(question: str, retry_context: dict | None = None) -> dict:
     if AI_PROVIDER == "ollama":
-        return ask_ollama(question)
+        return ask_ollama(question, retry_context)
     if AI_PROVIDER == "openrouter":
-        return ask_openrouter(question)
-    return ask_gemini(question)
+        return ask_openrouter(question, retry_context)
+    return ask_gemini(question, retry_context)
 
 
 TABLE_INFO = None
@@ -2577,93 +2597,111 @@ def query():
         })
 
     # Use configured AI provider and fall back to rule-based SQL generation when needed.
-    result = ask_ai(question)
-    print(f"[STAGE_LOG] query() stage=4 (ai_sql_generation) action={result['action']} provider={AI_PROVIDER}")
-    if result["action"] == "DENY":
-        return jsonify({
-            "is_relevant": False,
-            "reason": result["reason"],
-            "sql": None,
-            "results": [],
-            "columns": [],
-        })
+    # Self-healing: if an AI-generated query fails to execute, feed the error back to
+    # the AI and let it retry with that context, up to MAX_SQL_RETRY_ATTEMPTS extra tries.
+    sql = source = None
+    columns = results = None
+    execution_error = None
+    retry_context = None
+    max_attempts = MAX_SQL_RETRY_ATTEMPTS + 1
 
-    from_ai = result["action"] == "SQL"
-    sql = result.get("sql") if from_ai else None
-    source = (
-        "ollama" if AI_PROVIDER == "ollama" and from_ai else
-        "openrouter" if AI_PROVIDER == "openrouter" and from_ai else
-        "gemini" if AI_PROVIDER == "google" and from_ai else
-        "fallback_rules"
-    )
-    sql_params = None
-    if not sql:
-        sql, sql_params = generate_sql(question)
-        source = "fallback_rules"
-        print(f"[STAGE_LOG] query() stage=5 (fallback_sql_generation) sql={sql[:80]!r}")
-
-    # Canonicalize SQL to the constrained rule-based generator output so execution
-    # never uses free-form SQL text derived from user input or model output.
-    canonical_sql, canonical_params = generate_sql(question)
-    sql = canonical_sql
-    sql_params = canonical_params
-
-    # Handle no-match response from the fallback engine before safety validation
-    if sql and sql.startswith("NO_MATCH:"):
-        return jsonify({
-            "is_relevant": False,
-            "reason": sql,
-            "sql": sql,
-            "results": [],
-            "columns": [],
-        })
-
-    # Safety validation: reject unsafe SQL before execution
-    if not is_safe_select(sql):
-        return jsonify({
-            "is_relevant": False,
-            "reason": "The generated query was rejected by the safety validator. Only SELECT / WITH statements are allowed.",
-            "sql": sql,
-            "results": [],
-            "columns": [],
-        })
-
-    try:
-        print(f"[STAGE_LOG] query() stage=6 (execute_sql) sql={sql[:100]!r}")
-        columns, results = execute_sql(sql, sql_params)
-
-        # Check for revenue/sum/aggregate queries returning empty results (e.g. date filters with no matching data)
-        if not results and ('SUM(' in sql.upper() or 'COUNT(' in sql.upper()) and any(term in sql.upper() for term in ('WHERE', 'BETWEEN', 'YEAR(')):
-            print(f"[STAGE_LOG] query() stage=6b (empty_aggregate_detected)")
+    for attempt in range(1, max_attempts + 1):
+        result = ask_ai(question, retry_context)
+        print(f"[STAGE_LOG] query() stage=4 (ai_sql_generation) attempt={attempt} action={result['action']} provider={AI_PROVIDER}")
+        if result["action"] == "DENY":
             return jsonify({
-                "is_relevant": True,
-                "sql": sql,
-                "source": source,
-                "columns": columns,
+                "is_relevant": False,
+                "reason": result["reason"],
+                "sql": None,
                 "results": [],
-                "message": "No data found for the specified period. (The query itself is correct - there are simply no matching rows.)"
+                "columns": [],
             })
 
-        # Save to history for follow-up questions
-        _conversation_history.append({"q": question, "sql": sql})
-        if len(_conversation_history) > MAX_HISTORY:
-            _conversation_history.pop(0)
-        print(f"[STAGE_LOG] query() stage=6 (execute_sql_complete) rows={len(results)}")
-        return jsonify({
-            "is_relevant": True,
-            "sql": sql,
-            "source": source,
-            "columns": columns,
-            "results": results,
-        })
-    except Exception as e:
-        print(f"[STAGE_LOG] query() stage=6 (execute_sql_error) error={e!r}")
+        from_ai = result["action"] == "SQL"
+        candidate_sql = result.get("sql") if from_ai else None
+        candidate_params = None
+        if from_ai:
+            source = (
+                "ollama" if AI_PROVIDER == "ollama" else
+                "openrouter" if AI_PROVIDER == "openrouter" else
+                "gemini" if AI_PROVIDER == "google" else
+                "fallback_rules"
+            )
+        else:
+            candidate_sql, candidate_params = generate_sql(question)
+            source = "fallback_rules"
+            print(f"[STAGE_LOG] query() stage=5 (fallback_sql_generation) sql={candidate_sql[:80]!r}")
+
+        # Handle no-match response from the fallback engine before safety validation
+        if candidate_sql and candidate_sql.startswith("NO_MATCH:"):
+            return jsonify({
+                "is_relevant": False,
+                "reason": candidate_sql,
+                "sql": candidate_sql,
+                "results": [],
+                "columns": [],
+            })
+
+        # Safety validation: reject unsafe SQL before execution
+        if not is_safe_select(candidate_sql):
+            return jsonify({
+                "is_relevant": False,
+                "reason": "The generated query was rejected by the safety validator. Only SELECT / WITH statements are allowed.",
+                "sql": candidate_sql,
+                "results": [],
+                "columns": [],
+            })
+
+        try:
+            print(f"[STAGE_LOG] query() stage=6 (execute_sql) attempt={attempt} sql={candidate_sql[:100]!r}")
+            columns, results = execute_sql(candidate_sql, candidate_params)
+            sql = candidate_sql
+            execution_error = None
+            break
+        except Exception as e:
+            detail = str(e.__cause__) if e.__cause__ else str(e)
+            print(f"[STAGE_LOG] query() stage=6 (execute_sql_error) attempt={attempt} from_ai={from_ai} error={detail!r}")
+            execution_error = e
+            sql = candidate_sql
+            # Only the AI can act on error feedback; retrying deterministic
+            # rule-based SQL would just reproduce the same failure.
+            if from_ai and attempt < max_attempts:
+                retry_context = {"sql": candidate_sql, "error": detail}
+                continue
+            break
+
+    if execution_error is not None:
         return jsonify({
             "error": "An error occurred while executing the query. Please try rephrasing your question.",
             "is_relevant": True,
             "sql": None,
             "results": []
         }), 500
+
+    # Check for revenue/sum/aggregate queries returning empty results (e.g. date filters with no matching data)
+    if not results and ('SUM(' in sql.upper() or 'COUNT(' in sql.upper()) and any(term in sql.upper() for term in ('WHERE', 'BETWEEN', 'YEAR(')):
+        print(f"[STAGE_LOG] query() stage=6b (empty_aggregate_detected)")
+        return jsonify({
+            "is_relevant": True,
+            "sql": sql,
+            "source": source,
+            "columns": columns,
+            "results": [],
+            "message": "No data found for the specified period. (The query itself is correct - there are simply no matching rows.)"
+        })
+
+    # Save to history for follow-up questions
+    _conversation_history.append({"q": question, "sql": sql})
+    if len(_conversation_history) > MAX_HISTORY:
+        _conversation_history.pop(0)
+    print(f"[STAGE_LOG] query() stage=6 (execute_sql_complete) rows={len(results)}")
+    return jsonify({
+        "is_relevant": True,
+        "sql": sql,
+        "source": source,
+        "columns": columns,
+        "results": results,
+    })
 
 
 @app.route("/schema", methods=["GET"])
