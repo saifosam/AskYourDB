@@ -2342,6 +2342,14 @@ def is_safe_select(sql: str) -> bool:
     return True
 
 
+def _sql_contains_inline_string_literals(sql: str) -> bool:
+    """Return True if SQL contains single-quoted string literals after comment stripping."""
+    cleaned = _strip_block_comments(sql)
+    cleaned = re.sub(r'--[^\n]*', ' ', cleaned)
+    # Matches SQL string literals including escaped '' inside them.
+    return re.search(r"'(?:''|[^'])*'", cleaned) is not None
+
+
 def _is_strictly_safe_sql_for_execution(sql: str) -> bool:
     """Defense-in-depth SQL validation for dynamically generated queries."""
     if not sql or not isinstance(sql, str):
@@ -2399,6 +2407,9 @@ def execute_sql(sql, params=None):
     try:
         if not _is_strictly_safe_sql_for_execution(sql):
             raise ValueError("Rejected potentially unsafe SQL query")
+        # Enforce parameterized value handling: block inline quoted literals.
+        if _sql_contains_inline_string_literals(sql):
+            raise ValueError("Rejected SQL with inline string literals; use bound parameters")
         cursor.execute(sql, params)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
