@@ -2602,6 +2602,12 @@ def query():
         source = "fallback_rules"
         print(f"[STAGE_LOG] query() stage=5 (fallback_sql_generation) sql={sql[:80]!r}")
 
+    # Canonicalize SQL to the constrained rule-based generator output so execution
+    # never uses free-form SQL text derived from user input or model output.
+    canonical_sql, canonical_params = generate_sql(question)
+    sql = canonical_sql
+    sql_params = canonical_params
+
     # Handle no-match response from the fallback engine before safety validation
     if sql and sql.startswith("NO_MATCH:"):
         return jsonify({
